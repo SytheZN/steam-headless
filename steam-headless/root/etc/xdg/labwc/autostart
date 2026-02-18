@@ -1,0 +1,4 @@
+wlr-randr --output WL-1 --custom-mode 1920x1080 &
+swaybg -c '#262624' &
+waybar &
+steam && switch-session steam &

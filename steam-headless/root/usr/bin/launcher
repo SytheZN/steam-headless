@@ -1,0 +1,14 @@
+#!/bin/bash
+
+# Wrapper to run applications in gamescope --steam mode
+# Launches through reaper script
+
+if [ -z "$1" ]; then
+    log "launcher" "Error: No command specified"
+    exit 1
+fi
+
+log "launcher" "Launching: $*"
+
+DISPLAY=:0 xprop -root -f GAMESCOPECTRL_BASELAYER_APPID 32c -set GAMESCOPECTRL_BASELAYER_APPID 480
+exec reaper SteamLaunch AppId=480 -- "$@"

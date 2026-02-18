@@ -1,0 +1,6 @@
+#!/bin/bash
+
+log "steamos-session-select" "Called"
+
+# Switch to desktop mode
+switch-session desktop &

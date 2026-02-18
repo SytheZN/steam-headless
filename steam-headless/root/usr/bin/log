@@ -1,0 +1,6 @@
+#!/bin/bash
+
+unit="$1"
+message="$2"
+
+echo "[$unit] $message" > "/tmp/headless.log"

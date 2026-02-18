@@ -1,0 +1,63 @@
+diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
+index 65411dc..215c405 100644
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -424,6 +424,11 @@ bool CVulkanDevice::selectPhysDev(VkSurfaceKHR surface)
+ 
+ 	VkPhysicalDeviceProperties props;
+ 	vk.GetPhysicalDeviceProperties( m_physDev, &props );
++
++	// NVIDIA requires BGR formats to be swapped to RGB when using linear tiling with sampling
++	if (props.vendorID == 0x10DE) /* NVIDIA */
++		m_bNeedsBGRSwapForSampling = true;
++
+ 	vk_log.infof( "selecting physical device '%s': queue family %x (general queue family %x)", props.deviceName, m_queueFamily, m_generalQueueFamily );
+ 
+ 	return true;
+@@ -3603,6 +3608,18 @@ void vulkan_garbage_collect( void )
+ 
+ gamescope::Rc<CVulkanTexture> vulkan_acquire_screenshot_texture(uint32_t width, uint32_t height, bool exportable, uint32_t drmFormat, EStreamColorspace colorspace)
+ {
++	// On NVIDIA, BGR formats need to be swapped to RGB when using linear tiling with sampling
++	if (g_device.needsBGRSwapForSampling())
++	{
++		switch (drmFormat)
++		{
++			case DRM_FORMAT_XRGB8888:   drmFormat = DRM_FORMAT_XBGR8888; break;
++			case DRM_FORMAT_ARGB8888:   drmFormat = DRM_FORMAT_ABGR8888; break;
++			case DRM_FORMAT_XRGB2101010: drmFormat = DRM_FORMAT_XBGR2101010; break;
++			case DRM_FORMAT_ARGB2101010: drmFormat = DRM_FORMAT_ABGR2101010; break;
++		}
++	}
++
+ 	for (auto& pScreenshotImage : g_output.pScreenshotImages)
+ 	{
+ 		if (pScreenshotImage == nullptr)
+@@ -3613,6 +3630,7 @@ gamescope::Rc<CVulkanTexture> vulkan_acquire_screenshot_texture(uint32_t width,
+ 			screenshotImageFlags.bMappable = true;
+ 			screenshotImageFlags.bTransferDst = true;
+ 			screenshotImageFlags.bStorage = true;
++			screenshotImageFlags.bSampled = true;
+ 			if (exportable || drmFormat == DRM_FORMAT_NV12) {
+ 				screenshotImageFlags.bExportable = true;
+ 				screenshotImageFlags.bLinear = true; // TODO: support multi-planar DMA-BUF export via PipeWire
+diff --git a/src/rendervulkan.hpp b/src/rendervulkan.hpp
+index 63cc602..4d04d63 100644
+--- a/src/rendervulkan.hpp
++++ b/src/rendervulkan.hpp
+@@ -804,6 +804,7 @@ public:
+ 	inline bool hasDrmPrimaryDevId() {return m_bHasDrmPrimaryDevId;}
+ 	inline dev_t primaryDevId() {return m_drmPrimaryDevId;}
+ 	inline bool supportsFp16() {return m_bSupportsFp16;}
++	inline bool needsBGRSwapForSampling() {return m_bNeedsBGRSwapForSampling;}
+ 
+ 	inline std::pair<void *, uint32_t> uploadBufferData(uint32_t size)
+ 	{
+@@ -868,6 +869,7 @@ protected:
+ 	bool m_bHasDrmPrimaryDevId = false;
+ 	bool m_bSupportsModifiers = false;
+ 	bool m_bInitialized = false;
++	bool m_bNeedsBGRSwapForSampling = false;
+ 
+ 
+ 	VkPhysicalDeviceMemoryProperties m_memoryProperties;

@@ -1,0 +1,69 @@
+{
+  "layer": "top",
+  "position": "top",
+
+  "modules-left": [
+    "custom/exit",
+    "custom/right-arrow-dark",
+    "custom/right-arrow-light",
+    "custom/steam",
+    "custom/right-arrow-dark"
+  ],
+  "modules-center": [
+    "custom/left-arrow-dark",
+    "clock#1",
+    "custom/left-arrow-light",
+    "custom/left-arrow-dark",
+    "clock#2",
+    "custom/right-arrow-dark",
+    "custom/right-arrow-light",
+    "clock#3",
+    "custom/right-arrow-dark"
+  ],
+  "modules-right": [
+    "custom/left-arrow-dark",
+    "tray"
+  ],
+
+  "custom/exit": {
+    "format": "Exit",
+    "tooltip": false,
+    "on-click": "switch-session steam"
+  },
+  "custom/steam": {
+    "format": "Steam",
+    "tooltip": false,
+    "on-click": "steam"
+  },
+  "custom/left-arrow-dark": {
+    "format": "",
+    "tooltip": false
+  },
+  "custom/left-arrow-light": {
+    "format": "",
+    "tooltip": false
+  },
+  "custom/right-arrow-dark": {
+    "format": "",
+    "tooltip": false
+  },
+  "custom/right-arrow-light": {
+    "format": "",
+    "tooltip": false
+  },
+  "clock#1": {
+    "format": "{:%a}",
+    "tooltip": false
+  },
+  "clock#2": {
+    "format": "{:%H:%M}",
+    "tooltip": false
+  },
+  "clock#3": {
+    "format": "{:%d-%m}",
+    "tooltip": false
+  },
+  "tray": {
+    "icon-size": 20
+  }
+}

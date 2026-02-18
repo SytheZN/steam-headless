@@ -1,0 +1,38 @@
+#!/bin/bash
+
+SESSION_FILE="/tmp/next-session"
+
+log "session-manager" "Session manager started"
+
+# Start with Steam by default
+echo "${DEFAULT_SESSION:-steam}" > "$SESSION_FILE"
+
+while [ -f "$SESSION_FILE" ]; do
+    next_session=$(cat "$SESSION_FILE")
+    rm "$SESSION_FILE"
+
+    log "session-manager" "Launching session: $next_session"
+    case "$next_session" in
+        steam)
+            steam -bigpicture -steamos3
+            log "session-manager" "Steam exited"
+            ;;
+        desktop)
+            launcher env \
+            WAYLAND_DISPLAY="$GAMESCOPE_WAYLAND_DISPLAY" \
+            WLR_BACKENDS=wayland \
+            WLR_NO_HARDWARE_CURSORS=1 \
+            labwc
+            log "session-manager" "Desktop exited"
+            ;;
+        shell)
+            launcher konsole
+            log "session-manager" "Shell exited"
+            ;;
+        *)
+            log "session-manager" "Unknown session: $next_session"
+            ;;
+    esac
+done
+
+log "session-manager" "Session manager exiting (no next session)"

@@ -1,0 +1,12 @@
+#!/bin/bash
+
+# Skip arguments until we find --
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--" ]; then
+        shift  # Skip the -- itself
+        break
+    fi
+    shift
+done
+
+"$@"

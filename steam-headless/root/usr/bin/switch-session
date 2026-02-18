@@ -1,0 +1,34 @@
+#!/bin/bash
+
+session="$1"
+
+if [ -z "$session" ]; then
+    log "switch-session" "Error: No session specified"
+    exit 1
+fi
+
+log "switch-session" "Switching to $session"
+
+# Request session
+echo "$session" > /tmp/next-session
+
+# Kill current session
+if pgrep -x steam > /dev/null; then
+    log "switch-session" "Shutting down Steam"
+    steam -shutdown
+fi
+
+if pgrep -x labwc > /dev/null; then
+    # wait for steam desktop to exit before killing labwc
+    while pgrep -x steam > /dev/null; do
+      sleep 0.5
+    done
+
+    log "eswitch-session" "Killing labwc"
+    pkill -x labwc
+fi
+
+if pgrep -x konsole > /dev/null; then
+    log "switch-session" "Killing konsole terminal"
+    pkill -x konsole
+fi
