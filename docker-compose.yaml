@@ -1,11 +1,11 @@
 services:
   steam-gamescope:
-    build: ./steam-headless
+    build: ./src
     restart: no
-    ipc: host
     ports:
-      - "27036-27037:27036-27037/tcp"  # Steam Remote Play
-      - "27031-27036:27031-27036/udp"  # Steam Remote Play
+      - "27015-27050:27015-27050/tcp"
+      - "27000-27250:27000-27250/udp"
+      - "4380:4380/udp"
 
     # GPU access via NVIDIA runtime
     runtime: nvidia
@@ -17,24 +17,25 @@ services:
       - PULSE_SERVER=unix:/tmp/pulse/native
       - GAMESCOPE_BACKEND
       - DEFAULT_SESSION
+      - HEADLESS_DEBUG
 
     volumes:
       - ./steam-data:/home/steam/.local/share/Steam:rw
       - /dev/dri:/dev/dri:rw
-      - /dev/input:/dev/input:rw
       - /run/user/1000/pulse:/tmp/pulse:rw
-      - /var/run/dbus:/var/run/dbus:ro
+      - /var/run/dbus:/var/run/dbus:rw
       - /run/user/1000/wayland-0:/tmp/runtime/host-wayland-0:rw
-      - /run/systemd:/run/systemd:ro
 
     devices:
-      - /dev/uinput:/dev/uinput
       - /dev/dri:/dev/dri
+
+    shm_size: '2gb'
 
     cap_add:
       - SYS_ADMIN
-      - SYS_NICE
+      # Only needed when running with debug=uinput_extra for uevent broadcasts
+      #- NET_ADMIN
 
     security_opt:
-      - seccomp:unconfined
-      - apparmor:unconfined
+      - seccomp:./seccomp.json
+      - label:disable

@@ -7,6 +7,22 @@ log "session-manager" "Session manager started"
 # Start with Steam by default
 echo "${DEFAULT_SESSION:-steam}" > "$SESSION_FILE"
 
+# Enable gamescope debug logging if requested
+if csvhas wlserver "$HEADLESS_DEBUG"; then
+    log "session-manager" "Enabling Wayland server debug logging"
+    gamescopectl log_wlserver debug
+fi
+
+if csvhas xwm "$HEADLESS_DEBUG"; then
+    log "session-manager" "Enabling X window manager debug logging"
+    gamescopectl log_xwm debug
+fi
+
+if csvhas gs_ei "$HEADLESS_DEBUG"; then
+    log "session-manager" "Enabling gamescope emulated input debug logging"
+    gamescopectl log_gamescope_ei debug
+fi
+
 while [ -f "$SESSION_FILE" ]; do
     next_session=$(cat "$SESSION_FILE")
     rm "$SESSION_FILE"

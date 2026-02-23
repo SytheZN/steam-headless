@@ -1,4 +1,4 @@
-FROM registry.fedoraproject.org/fedora:43 AS gamescope-builder
+FROM registry.fedoraproject.org/fedora:43 AS builder
 
 RUN dnf install -y \
     git \
@@ -6,6 +6,7 @@ RUN dnf install -y \
     ninja-build \
     gcc \
     gcc-c++ \
+    glibc-devel.i686 \
     cmake \
     pipewire-devel \
     hwdata \
@@ -40,10 +41,10 @@ RUN git clone https://github.com/ValveSoftware/gamescope.git /gamescope
 
 WORKDIR /gamescope
 
+RUN git submodule update --init --recursive
+
 COPY gamescope-patches/ /tmp/gamescope-patches/
 RUN for patch in /tmp/gamescope-patches/*.patch; do git apply "$patch"; done
-
-RUN git submodule update --init --recursive
 
 # TEMPORARY INSTALLS FOR BUILD
 #RUN dnf install -y  && dnf clean all
@@ -55,6 +56,11 @@ RUN meson build/ --prefix=/usr --buildtype=release \
     -Ddrm_backend=enabled \
     -Dsdl2_backend=enabled
 RUN ninja -C build/
+
+# Build uinput-proxy
+COPY uinput-proxy/ /uinput-proxy/
+WORKDIR /uinput-proxy
+RUN make dist
 
 FROM registry.fedoraproject.org/fedora:43 AS runtime
 
@@ -70,24 +76,38 @@ RUN dnf install -y \
     util-linux \
     dbus-daemon \
     libei \
+    libeis \
     pipewire-utils \
-    labwc \
     konsole \
+    labwc \
     procps-ng \
     xdotool \
     xprop \
     swaybg \
     waybar \
     wlr-randr \
+    `# Weak dependencies` \
+    lsof \
     && dnf clean all
 
 # TEMPORARY INSTALLS FOR RUNTIME
-RUN dnf install -y antimicrox && dnf clean all
+RUN dnf install -y jstest-gtk xwininfo && dnf clean all
 
 # Overwrite distro gamescope binary with our custom build
-COPY --from=gamescope-builder /gamescope/build/src/gamescope /usr/bin/gamescope
+COPY --from=builder /gamescope/build/src/gamescope /usr/bin/gamescope
+
+# Install uinput-proxy
+COPY --from=builder /uinput-proxy/uinput-daemon /usr/local/bin/
+RUN chmod 4755 /usr/local/bin/uinput-daemon
+COPY --from=builder /uinput-proxy/uinput-install /usr/local/bin/
+RUN chmod 4755 /usr/local/bin/uinput-install
+COPY --from=builder /uinput-proxy/dist/uinput/ /opt/uinput/
+
+RUN touch /.container
 
 RUN useradd -m -u 1000 steam && \
+    groupadd -f input && \
+    usermod -aG input steam && \
     mkdir -p /home/steam/.local/share/Steam && \
     mkdir -p /home/steam/.local/state/wireplumber && \
     mkdir -p /tmp/runtime && \
@@ -103,5 +123,6 @@ WORKDIR /home/steam
 
 ENV GAMESCOPE_BACKEND=
 ENV DEFAULT_SESSION=
+ENV HEADLESS_DEBUG=
 
 CMD ["/start.sh"]

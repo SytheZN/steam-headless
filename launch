@@ -1,0 +1,103 @@
+#!/bin/bash
+
+set -e
+
+# Default values
+GAMESCOPE_BACKEND=""
+DEFAULT_SESSION=""
+HEADLESS_DEBUG=""
+
+# Help message
+show_help() {
+    cat << EOF
+Usage: ./launch [OPTIONS]
+
+Launch steam-headless container with configurable options.
+
+OPTIONS:
+    -b, --backend BACKEND    Set gamescope backend (sdl, headless, auto, etc.)
+    -s, --session SESSION    Set default session (steam, desktop, shell)
+    -d, --debug FLAGS        Set debug flags (comma-separated):
+                             - wlserver: Enable Wayland server debug logging
+                             - xwm: Enable X window manager debug logging
+                             - focus: Enable gamescope focus debugging
+                             - gs_ei: Enable gamescope emulated input debugging
+                             - uinput: Enable uinput-daemon debug logging
+                             - uinputld: Enable uinput preload library debug logging
+                             - uinput_extra: Enable extra intercepts and uevents
+                             - ALL: Enable all debug flags
+    -h, --help               Show this help message
+
+EXAMPLES:
+    ./launch                              # Launch with defaults
+    ./launch -b sdl -s steam              # SDL backend with Steam session
+    ./launch --debug wlserver,xwm         # Enable input debugging
+    ./launch -b sdl -d focus              # SDL backend with focus debugging
+    ./launch -d ALL                       # Enable all debug flags
+    ./launch --backend sdl --session desktop --debug ALL   # All options with full debugging
+
+EOF
+    exit 0
+}
+
+# Parse arguments using getopt (supports long options)
+TEMP=$(getopt -o b:s:d:h --long backend:,session:,debug:,help -n 'launch' -- "$@")
+if [ $? != 0 ]; then
+    echo >&2
+    show_help
+fi
+
+eval set -- "$TEMP"
+
+while true; do
+    case "$1" in
+        -b|--backend)
+            GAMESCOPE_BACKEND="$2"
+            shift 2
+            ;;
+        -s|--session)
+            DEFAULT_SESSION="$2"
+            shift 2
+            ;;
+        -d|--debug)
+            if [ "$2" = "ALL" ]; then
+                HEADLESS_DEBUG="wlserver,xwm,focus,gs_ei,uinput,uinputld,uinput_extra"
+            else
+                HEADLESS_DEBUG="$2"
+            fi
+            shift 2
+            ;;
+        -h|--help)
+            show_help
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            echo "Internal error!" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# Show configuration
+echo "===== Steam Headless Launch Configuration ====="
+echo "GAMESCOPE_BACKEND: ${GAMESCOPE_BACKEND:-<default>}"
+echo "DEFAULT_SESSION:   ${DEFAULT_SESSION:-<default>}"
+echo "HEADLESS_DEBUG:    ${HEADLESS_DEBUG:-<none>}"
+echo "==============================================="
+echo
+
+# Launch container
+rm -rf steam-data/logs
+mkdir -p steam-data/logs
+
+docker compose down -v
+
+docker compose build
+
+GAMESCOPE_BACKEND="$GAMESCOPE_BACKEND" \
+DEFAULT_SESSION="$DEFAULT_SESSION" \
+HEADLESS_DEBUG="$HEADLESS_DEBUG" \
+exec docker compose up

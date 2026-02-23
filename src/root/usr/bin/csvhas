@@ -1,0 +1,10 @@
+#!/bin/bash
+# Check if a value exists in a comma-separated list
+# Usage: csvhas VALUE "csv,list,here"
+# Returns 0 (success) if value is found, 1 (failure) if not
+
+needle="$1"
+haystack="$2"
+
+# Add commas to beginning and end for exact matching
+[[ ",$haystack," == *",$needle,"* ]]

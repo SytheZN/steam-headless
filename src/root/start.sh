@@ -1,13 +1,18 @@
 #!/bin/bash
 set -e
 
-# Create named pipe for logging
+# Create named pipe for logging; tee output to both stdout and a persistent log file
+mkdir -p "/home/steam/.local/share/Steam/logs"
 mkfifo "/tmp/headless.log"
 tail -f "/tmp/headless.log" &
 
 log "start" "Logging initialized"
 
-# Start D-Bus session bus
+eval "$(setup-uinput)"
+/usr/local/bin/uinput-daemon &
+
+until [ -S /tmp/uinput-proxy.sock ]; do sleep 0.1; done
+
 export $(dbus-launch)
 
 # In headless mode, don't connect to host audio
@@ -15,7 +20,6 @@ if [ "${GAMESCOPE_BACKEND:-headless}" = "headless" ]; then
     unset PULSE_SERVER
 fi
 
-# Start PipeWire for audio
 pipewire &
 pipewire-pulse &
 wireplumber &
@@ -23,6 +27,13 @@ wireplumber &
 sleep 3
 
 log "start" "System init complete"
+
+# Build gamescope debug flags
+GAMESCOPE_DEBUG_FLAGS=""
+if csvhas focus "$HEADLESS_DEBUG"; then
+    log "start" "Enabling focus debugging"
+    GAMESCOPE_DEBUG_FLAGS="--debug-focus"
+fi
 
 # Start Gamescope with configurable backend
 # Use GAMESCOPE_BACKEND env var (defaults to headless)
@@ -34,4 +45,5 @@ WAYLAND_DISPLAY=host-wayland-0 exec gamescope \
     --prefer-vk-device /dev/dri/renderD128 \
     -W 1920 -H 1080 \
     -r 60 \
+    $GAMESCOPE_DEBUG_FLAGS \
     -- session-manager

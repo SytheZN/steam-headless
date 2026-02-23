@@ -7,27 +7,21 @@ Containerized Steam with gamescope for remote gaming via Steam Remote Play.
 - Docker with NVIDIA runtime
 - NVIDIA GPU
 
-## Usage
+## Quick start
+
+First run — opens a visible desktop session to log into Steam:
 
 ```bash
-docker compose up --build
+./launch -b sdl -s desktop
 ```
 
-or to jump straight into nested desktop mode:
+After that, run headless for Remote Play:
+
 ```bash
-GAMESCOPE_BACKEND=sdl DEFAULT_SESSION=desktop docker compose up
+./launch
 ```
 
-## Configuration
-
-Environment variables:
-- `GAMESCOPE_BACKEND`: `sdl` for local testing, `headless` for remote (default: headless)
-- `DEFAULT_SESSION`: `steam`, `desktop`, or `shell` (default: steam)
-
-## Notes
-
-- Custom gamescope build with NVIDIA fixes and input emulation
-- Logs: `docker compose logs -f`
+Run `./launch --help` for all options.
 
 ## License
 

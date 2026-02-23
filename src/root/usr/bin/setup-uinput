@@ -1,0 +1,24 @@
+#!/bin/bash
+set -e
+
+# Copy uinput preload library to /tmp
+cp -r /opt/uinput /tmp/uinput
+
+# Register the preload library with ld.so and emit LD_PRELOAD
+lib=uinput.so
+if csvhas uinput_extra "$HEADLESS_DEBUG"; then
+  lib=uinput.extra.so
+  echo "export UINPUT_EXTRA=1"
+fi
+/usr/local/bin/uinput-install /tmp/uinput "$lib"
+
+# Emit debug environment variables if needed
+if csvhas uinputld "$HEADLESS_DEBUG"; then
+  touch /home/steam/.local/share/Steam/logs/uinput.log
+  echo "export UINPUTLD_DEBUG='/home/steam/.local/share/Steam/logs/uinput.log'"
+fi
+
+if csvhas uinput "$HEADLESS_DEBUG"; then
+  touch /home/steam/.local/share/Steam/logs/uinput.log
+  echo "export UINPUT_DEBUG='/home/steam/.local/share/Steam/logs/uinput.log'"
+fi
