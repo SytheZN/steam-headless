@@ -16,6 +16,7 @@ services:
       - XDG_RUNTIME_DIR=/tmp/runtime
       - PULSE_SERVER=unix:/tmp/pulse/native
       - GAMESCOPE_BACKEND
+      - GAMESCOPE_RESOLUTION
       - DEFAULT_SESSION
       - HEADLESS_DEBUG
 

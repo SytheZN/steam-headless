@@ -35,6 +35,12 @@ RUN dnf install -y \
     SDL2-devel \
     libei-devel \
     libeis-devel \
+    `# vaapi-vulkan-nvidia build deps` \
+    make \
+    pkg-config \
+    vulkan-headers \
+    libva-devel \
+    libva-devel.i686 \
     && dnf clean all
 
 RUN git clone https://github.com/ValveSoftware/gamescope.git /gamescope
@@ -61,6 +67,11 @@ RUN ninja -C build/
 COPY uinput-proxy/ /uinput-proxy/
 WORKDIR /uinput-proxy
 RUN make dist
+
+# Build vaapi-vulkan-nvidia driver
+RUN git clone https://github.com/SytheZN/vaapi-vulkan-nvidia.git /vaapi-vulkan-nvidia
+WORKDIR /vaapi-vulkan-nvidia
+RUN make all
 
 FROM registry.fedoraproject.org/fedora:43 AS runtime
 
@@ -103,6 +114,11 @@ COPY --from=builder /uinput-proxy/uinput-install /usr/local/bin/
 RUN chmod 4755 /usr/local/bin/uinput-install
 COPY --from=builder /uinput-proxy/dist/uinput/ /opt/uinput/
 
+# Install vaapi-vulkan-nvidia driver
+COPY --from=builder /vaapi-vulkan-nvidia/out/build_x64/nvidia_vulkan_drv_video.so /usr/lib64/dri/nvidia_vulkan_drv_video.so
+COPY --from=builder /vaapi-vulkan-nvidia/out/build_i686/nvidia_vulkan_drv_video.so /usr/lib/dri/nvidia_vulkan_drv_video.so
+COPY --from=builder /vaapi-vulkan-nvidia/out/build_proxy/nvidia_vulkan_proxy /usr/lib64/nvidia_vulkan_proxy
+
 RUN touch /.container
 
 RUN useradd -m -u 1000 steam && \
@@ -124,5 +140,6 @@ WORKDIR /home/steam
 ENV GAMESCOPE_BACKEND=
 ENV DEFAULT_SESSION=
 ENV HEADLESS_DEBUG=
+ENV LIBVA_DRIVER_NAME=nvidia_vulkan
 
 CMD ["/start.sh"]
