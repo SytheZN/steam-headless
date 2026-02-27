@@ -103,16 +103,27 @@ echo "HEADLESS_DEBUG:       ${HEADLESS_DEBUG:-<none>}"
 echo "==============================================="
 echo
 
+# Determine compose files
+COMPOSE_FILES="-f docker-compose.yaml"
+if [ -f docker-compose.local-override.yaml ]; then
+    COMPOSE_FILES="$COMPOSE_FILES -f docker-compose.local-override.yaml"
+else
+    COMPOSE_FILES="$COMPOSE_FILES -f docker-compose.ports.yaml"
+    if [ -f docker-compose.local.yaml ]; then
+        COMPOSE_FILES="$COMPOSE_FILES -f docker-compose.local.yaml"
+    fi
+fi
+
 # Launch container
 rm -rf steam-data/logs
 mkdir -p steam-data/logs
 
-docker compose down -v
+docker compose $COMPOSE_FILES down -v
 
-docker compose build
+docker compose $COMPOSE_FILES build
 
 GAMESCOPE_BACKEND="$GAMESCOPE_BACKEND" \
 GAMESCOPE_RESOLUTION="$GAMESCOPE_RESOLUTION" \
 DEFAULT_SESSION="$DEFAULT_SESSION" \
 HEADLESS_DEBUG="$HEADLESS_DEBUG" \
-exec docker compose up
+exec docker compose $COMPOSE_FILES up

@@ -23,6 +23,27 @@ After that, run headless for Remote Play:
 
 Run `./launch --help` for all options.
 
+## Local configuration
+
+The launch script loads compose files in the following order:
+
+- `docker-compose.yaml` — base configuration (always loaded)
+- `docker-compose.ports.yaml` — default port forwarding
+- `docker-compose.local.yaml` — optional, additive customizations (extra volumes, env vars, etc.)
+
+If `docker-compose.local-override.yaml` exists, it replaces both `ports` and `local` entirely. Use this for advanced networking like macvlan where port forwarding isn't needed.
+
+### Adding extra volumes or settings
+
+Create a `docker-compose.local.yaml`:
+
+```yaml
+services:
+  steam-gamescope:
+    volumes:
+      - /path/to/games:/home/steam/libraries/games:rw
+```
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

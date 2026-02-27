@@ -2,10 +2,7 @@ services:
   steam-gamescope:
     build: ./src
     restart: no
-    ports:
-      - "27015-27050:27015-27050/tcp"
-      - "27000-27250:27000-27250/udp"
-      - "4380:4380/udp"
+    hostname: steam-headless
 
     # GPU access via NVIDIA runtime
     runtime: nvidia
