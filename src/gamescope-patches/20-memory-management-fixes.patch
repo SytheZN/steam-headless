@@ -1,0 +1,92 @@
+diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
+index 65411dc..00f153c 100644
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -1855,6 +1855,7 @@ void CVulkanCmdBuffer::prepareDestImage(CVulkanTexture *image)
+ 	if (!result.second)
+ 		return;
+ 	result.first->second.discarded = true;
++	result.first->second.needsImport = image->externalImage();
+ 	result.first->second.needsExport = image->externalImage();
+ 	result.first->second.needsPresentLayout = image->outputImage();
+ }
+@@ -1921,6 +1922,11 @@ void CVulkanCmdBuffer::insertBarrier(bool flush)
+ 
+ 		barriers.push_back(memoryBarrier);
+ 
++		if (isExport)
++			image->queueFamily = externalQueue;
++		else if (state.needsImport)
++			image->queueFamily = m_queueFamily;
++
+ 		state.discarded = false;
+ 		state.dirty = false;
+ 		state.needsImport = false;
+@@ -2220,7 +2226,7 @@ bool CVulkanTexture::BInit( uint32_t width, uint32_t height, uint32_t depth, uin
+ 		};
+ 	}
+ 	
+-	if ( pDMA != nullptr )
++	if ( pDMA != nullptr || ( flags.bExportable == true && tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT ) )
+ 	{
+ 		externalImageCreateInfo = {
+ 			.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+@@ -2692,14 +2698,14 @@ CVulkanTexture::~CVulkanTexture( void )
+ 	if ( m_pBackendFb != nullptr )
+ 		m_pBackendFb = nullptr;
+ 
+-	if ( m_vkImageMemory != VK_NULL_HANDLE )
++	if ( m_vkImage != VK_NULL_HANDLE )
+ 	{
+-		if ( m_vkImage != VK_NULL_HANDLE )
+-		{
+-			g_device.vk.DestroyImage( g_device.device(), m_vkImage, nullptr );
+-			m_vkImage = VK_NULL_HANDLE;
+-		}
++		g_device.vk.DestroyImage( g_device.device(), m_vkImage, nullptr );
++		m_vkImage = VK_NULL_HANDLE;
++	}
+ 
++	if ( m_vkImageMemory != VK_NULL_HANDLE )
++	{
+ 		g_device.vk.FreeMemory( g_device.device(), m_vkImageMemory, nullptr );
+ 		m_vkImageMemory = VK_NULL_HANDLE;
+ 	}
+@@ -3276,12 +3282,12 @@ static bool vulkan_make_output_images( VulkanOutput_t *pOutput )
+ 	pOutput->outputImages.resize(3); // extra image for partial composition.
+ 	pOutput->outputImagesPartialOverlay.resize(3);
+ 
+-	pOutput->outputImages[0] = nullptr;
+-	pOutput->outputImages[1] = nullptr;
+-	pOutput->outputImages[2] = nullptr;
+ 	pOutput->outputImagesPartialOverlay[0] = nullptr;
+ 	pOutput->outputImagesPartialOverlay[1] = nullptr;
+ 	pOutput->outputImagesPartialOverlay[2] = nullptr;
++	pOutput->outputImages[0] = nullptr;
++	pOutput->outputImages[1] = nullptr;
++	pOutput->outputImages[2] = nullptr;
+ 
+ 	uint32_t uDRMFormat = pOutput->uOutputFormat;
+ 
+diff --git a/src/reshade_effect_manager.cpp b/src/reshade_effect_manager.cpp
+index 18a9417..af2bb4d 100644
+--- a/src/reshade_effect_manager.cpp
++++ b/src/reshade_effect_manager.cpp
+@@ -1077,7 +1077,7 @@ bool ReshadeEffectPipeline::init(CVulkanDevice *device, const ReshadeEffectKey &
+             reshade_log.errorf("vkAllocateMemory failed");
+             return false;
+         }
+-        device->vk.BindBufferMemory(device->device(), m_buffer, m_bufferMemory, 0);
++        result = device->vk.BindBufferMemory(device->device(), m_buffer, m_bufferMemory, 0);
+         if (result != VK_SUCCESS)
+         {
+             reshade_log.errorf("vkBindBufferMemory failed");
+@@ -1191,7 +1191,7 @@ bool ReshadeEffectPipeline::init(CVulkanDevice *device, const ReshadeEffectKey &
+                     reshade_log.errorf("vkAllocateMemory failed");
+                     return false;
+                 }
+-                device->vk.BindBufferMemory(device->device(), scratchBuffer, scratchMemory, 0);
++                result = device->vk.BindBufferMemory(device->device(), scratchBuffer, scratchMemory, 0);
+                 if (result != VK_SUCCESS)
+                 {
+                     reshade_log.errorf("vkBindBufferMemory failed");

@@ -2,24 +2,23 @@ diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
 index 65411dc..215c405 100644
 --- a/src/rendervulkan.cpp
 +++ b/src/rendervulkan.cpp
-@@ -424,6 +424,11 @@ bool CVulkanDevice::selectPhysDev(VkSurfaceKHR surface)
- 
+@@ -424,6 +424,10 @@ bool CVulkanDevice::selectPhysDev(VkSurfaceKHR surface)
+
  	VkPhysicalDeviceProperties props;
  	vk.GetPhysicalDeviceProperties( m_physDev, &props );
 +
-+	// NVIDIA requires BGR formats to be swapped to RGB when using linear tiling with sampling
 +	if (props.vendorID == 0x10DE) /* NVIDIA */
-+		m_bNeedsBGRSwapForSampling = true;
++		m_bIsNvidia = true;
 +
  	vk_log.infof( "selecting physical device '%s': queue family %x (general queue family %x)", props.deviceName, m_queueFamily, m_generalQueueFamily );
- 
+
  	return true;
 @@ -3603,6 +3608,18 @@ void vulkan_garbage_collect( void )
- 
+
  gamescope::Rc<CVulkanTexture> vulkan_acquire_screenshot_texture(uint32_t width, uint32_t height, bool exportable, uint32_t drmFormat, EStreamColorspace colorspace)
  {
 +	// On NVIDIA, BGR formats need to be swapped to RGB when using linear tiling with sampling
-+	if (g_device.needsBGRSwapForSampling())
++	if (g_device.isNvidia())
 +	{
 +		switch (drmFormat)
 +		{
@@ -49,15 +48,15 @@ index 63cc602..4d04d63 100644
  	inline bool hasDrmPrimaryDevId() {return m_bHasDrmPrimaryDevId;}
  	inline dev_t primaryDevId() {return m_drmPrimaryDevId;}
  	inline bool supportsFp16() {return m_bSupportsFp16;}
-+	inline bool needsBGRSwapForSampling() {return m_bNeedsBGRSwapForSampling;}
- 
++	inline bool isNvidia() {return m_bIsNvidia;}
+
  	inline std::pair<void *, uint32_t> uploadBufferData(uint32_t size)
  	{
 @@ -868,6 +869,7 @@ protected:
  	bool m_bHasDrmPrimaryDevId = false;
  	bool m_bSupportsModifiers = false;
  	bool m_bInitialized = false;
-+	bool m_bNeedsBGRSwapForSampling = false;
- 
- 
++	bool m_bIsNvidia = false;
+
+
  	VkPhysicalDeviceMemoryProperties m_memoryProperties;
