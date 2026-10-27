@@ -1,0 +1,10 @@
+#!/bin/bash
+
+set -eu
+
+RET_NO_UPDATE=0
+
+info() { echo >&2 "$*"; }
+
+info "No BIOS update available"
+exit $RET_NO_UPDATE

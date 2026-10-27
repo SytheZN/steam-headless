@@ -1,0 +1,26 @@
+#!/bin/bash
+
+set -eu
+
+check=""
+
+info() { echo >&2 "$*"; }
+
+while [[ $# -ge 1 ]]; do
+  case "$1" in
+    "check") check=1 ;;
+    "--supports-duplicate-detection")
+      info "This script supports the duplicate detection option"
+      exit 0
+    ;;
+    *) ;;
+  esac
+  shift
+done
+
+sleep 10
+
+echo "FW Current: 4.5"
+echo "FW Available: 4.5"
+echo "FW up to date"
+exit 7

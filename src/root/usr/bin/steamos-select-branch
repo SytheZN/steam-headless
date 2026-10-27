@@ -1,0 +1,12 @@
+#!/bin/bash
+# Stub for SteamOS branch selection
+# Return success and output a fake branch name
+case "$1" in
+  -c|--check)
+    echo "main"
+    ;;
+  *)
+    # Just succeed for any other operation
+    ;;
+esac
+exit 0

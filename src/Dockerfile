@@ -35,6 +35,7 @@ RUN dnf install -y \
     SDL2-devel \
     libei-devel \
     libeis-devel \
+    catch-devel \
     `# vaapi-vulkan-nvidia build deps` \
     make \
     pkg-config \

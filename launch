@@ -117,6 +117,7 @@ fi
 # Launch container
 rm -rf steam-data/logs
 mkdir -p steam-data/logs
+mkdir -p steam-home/.steam steam-home/wireplumber
 
 docker compose $COMPOSE_FILES down -v
 

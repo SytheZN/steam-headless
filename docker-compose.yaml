@@ -19,6 +19,8 @@ services:
 
     volumes:
       - ./steam-data:/home/steam/.local/share/Steam:rw
+      - ./steam-home/.steam:/home/steam/.steam:rw
+      - ./steam-home/wireplumber:/home/steam/.local/state/wireplumber:rw
       - /dev/dri:/dev/dri:rw
       - /run/user/1000/pulse:/tmp/pulse:rw
       - /var/run/dbus:/var/run/dbus:rw

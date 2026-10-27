@@ -53,7 +53,11 @@ fi
 # Start Gamescope with configurable backend
 # Use GAMESCOPE_BACKEND env var (defaults to headless)
 # For setup: GAMESCOPE_BACKEND=sdl docker compose up
-WAYLAND_DISPLAY=host-wayland-0 exec gamescope \
+if [ "${GAMESCOPE_BACKEND:-headless}" != "headless" ]; then
+    export WAYLAND_DISPLAY=host-wayland-0
+fi
+
+exec gamescope \
     --steam \
     --backend ${GAMESCOPE_BACKEND:-headless} \
     --xwayland-count 1 \
