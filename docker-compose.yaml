@@ -14,6 +14,7 @@ services:
       - PULSE_SERVER=unix:/tmp/pulse/native
       - GAMESCOPE_BACKEND
       - GAMESCOPE_RESOLUTION
+      - GAMESCOPE_FRAMERATE
       - DEFAULT_SESSION
       - HEADLESS_DEBUG
 

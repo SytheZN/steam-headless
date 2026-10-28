@@ -64,7 +64,7 @@ COPY --from=sources /gamescope /gamescope
 WORKDIR /gamescope
 
 COPY gamescope-patches/ /tmp/gamescope-patches/
-RUN set -e; for patch in /tmp/gamescope-patches/*.patch; do git apply "$patch"; done
+RUN set -e; for patch in /tmp/gamescope-patches/*.patch; do [ -e "$patch" ] || continue; git apply "$patch"; done
 
 # TEMPORARY INSTALLS FOR BUILD
 #RUN dnf install -y  && dnf clean all

@@ -5,6 +5,7 @@ set -e
 # Default values
 GAMESCOPE_BACKEND=""
 GAMESCOPE_RESOLUTION=""
+GAMESCOPE_FRAMERATE=""
 DEFAULT_SESSION=""
 HEADLESS_DEBUG=""
 FORCE_BUILD=""
@@ -25,6 +26,7 @@ OPTIONS:
                              - 1080p: 1920x1080  (default)
                              - 1440p: 2560x1440
                              - 4k:    3840x2160
+    -f, --framerate FPS      Set gamescope refresh rate in Hz (default: 60)
     -s, --session SESSION    Set default session (steam, desktop, shell)
     -d, --debug FLAGS        Set debug flags (comma-separated):
                              - wlserver: Enable Wayland server debug logging
@@ -42,6 +44,7 @@ OPTIONS:
 EXAMPLES:
     ./launch                              # Launch with defaults
     ./launch -r 720p                      # Launch at 720p resolution
+    ./launch -r 1440p -f 120              # Launch at 1440p, 120Hz
     ./launch -b sdl -s steam              # SDL backend with Steam session
     ./launch --debug wlserver,xwm         # Enable input debugging
     ./launch -b sdl -d focus              # SDL backend with focus debugging
@@ -53,7 +56,7 @@ EOF
 }
 
 # Parse arguments using getopt (supports long options)
-TEMP=$(getopt -o b:r:s:d:h --long backend:,resolution:,session:,debug:,build,help -n 'launch' -- "$@")
+TEMP=$(getopt -o b:r:f:s:d:h --long backend:,resolution:,framerate:,session:,debug:,build,help -n 'launch' -- "$@")
 if [ $? != 0 ]; then
     echo >&2
     show_help
@@ -69,6 +72,10 @@ while true; do
             ;;
         -r|--resolution)
             GAMESCOPE_RESOLUTION="$2"
+            shift 2
+            ;;
+        -f|--framerate)
+            GAMESCOPE_FRAMERATE="$2"
             shift 2
             ;;
         -s|--session)
@@ -105,6 +112,7 @@ done
 echo "===== Steam Headless Launch Configuration ====="
 echo "GAMESCOPE_BACKEND:    ${GAMESCOPE_BACKEND:-<default>}"
 echo "GAMESCOPE_RESOLUTION: ${GAMESCOPE_RESOLUTION:-<default>}"
+echo "GAMESCOPE_FRAMERATE:  ${GAMESCOPE_FRAMERATE:-<default>}"
 echo "DEFAULT_SESSION:      ${DEFAULT_SESSION:-<default>}"
 echo "HEADLESS_DEBUG:       ${HEADLESS_DEBUG:-<none>}"
 echo "==============================================="
@@ -135,6 +143,7 @@ fi
 
 GAMESCOPE_BACKEND="$GAMESCOPE_BACKEND" \
 GAMESCOPE_RESOLUTION="$GAMESCOPE_RESOLUTION" \
+GAMESCOPE_FRAMERATE="$GAMESCOPE_FRAMERATE" \
 DEFAULT_SESSION="$DEFAULT_SESSION" \
 HEADLESS_DEBUG="$HEADLESS_DEBUG" \
 exec docker compose $COMPOSE_FILES up

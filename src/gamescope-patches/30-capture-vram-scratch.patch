@@ -1,0 +1,437 @@
+--- a/src/pipewire.cpp
++++ b/src/pipewire.cpp
+@@ -504,7 +504,7 @@
+ 
+ 	buffer->texture = new CVulkanTexture();
+ 	CVulkanTexture::createFlags screenshotImageFlags;
+-	screenshotImageFlags.bMappable = true;
++	screenshotImageFlags.bMappable = !is_dmabuf;
+ 	screenshotImageFlags.bTransferDst = true;
+ 	screenshotImageFlags.bStorage = true;
+ 	if (is_dmabuf || drmFormat == DRM_FORMAT_NV12)
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -1273,16 +1273,19 @@
+ }
+ 
+ 
+-int32_t CVulkanDevice::findMemoryType( VkMemoryPropertyFlags properties, uint32_t requiredTypeBits )
++int32_t CVulkanDevice::findMemoryType( VkMemoryPropertyFlags properties, uint32_t requiredTypeBits, VkMemoryPropertyFlags excludedProperties )
+ {
+ 	for ( uint32_t i = 0; i < m_memoryProperties.memoryTypeCount; i++ )
+ 	{
+ 		if ( ( ( 1 << i ) & requiredTypeBits ) == 0 )
+ 			continue;
+-		
++
+ 		if ( ( properties & m_memoryProperties.memoryTypes[ i ].propertyFlags ) != properties )
+ 			continue;
+-		
++
++		if ( excludedProperties & m_memoryProperties.memoryTypes[ i ].propertyFlags )
++			continue;
++
+ 		return i;
+ 	}
+ 	
+@@ -1925,6 +1928,42 @@
+ 	m_textureRefs.emplace_back(std::move(dst));
+ }
+ 
++void CVulkanCmdBuffer::copyImageToExternalBuffer(gamescope::Rc<CVulkanTexture> src, VkBuffer dst, std::span<const VkBufferImageCopy> regions)
++{
++	prepareSrcImage(src.get());
++	insertBarrier();
++
++	const uint32_t externalQueue = m_device->supportsModifiers() ? VK_QUEUE_FAMILY_FOREIGN_EXT : VK_QUEUE_FAMILY_EXTERNAL_KHR;
++
++	VkBufferMemoryBarrier acquire = {
++		.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
++		.srcAccessMask = 0,
++		.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++		.srcQueueFamilyIndex = externalQueue,
++		.dstQueueFamilyIndex = m_queueFamily,
++		.buffer = dst,
++		.offset = 0,
++		.size = VK_WHOLE_SIZE,
++	};
++	m_device->vk.CmdPipelineBarrier(m_cmdBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &acquire, 0, nullptr);
++
++	m_device->vk.CmdCopyImageToBuffer(m_cmdBuffer, src->vkImage(), VK_IMAGE_LAYOUT_GENERAL, dst, uint32_t(regions.size()), regions.data());
++
++	VkBufferMemoryBarrier release = {
++		.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
++		.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++		.dstAccessMask = 0,
++		.srcQueueFamilyIndex = m_queueFamily,
++		.dstQueueFamilyIndex = externalQueue,
++		.buffer = dst,
++		.offset = 0,
++		.size = VK_WHOLE_SIZE,
++	};
++	m_device->vk.CmdPipelineBarrier(m_cmdBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 1, &release, 0, nullptr);
++
++	m_textureRefs.emplace_back(std::move(src));
++}
++
+ void CVulkanCmdBuffer::clearImage(gamescope::Rc<CVulkanTexture> dst, const VkClearColorValue &color)
+ {
+ 	prepareDestImage(dst.get());
+@@ -2222,6 +2261,9 @@
+ 		imageInfo.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+ 	}
+ 
++	if ( imageInfo.format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM && ( usage & VK_IMAGE_USAGE_STORAGE_BIT ) )
++		imageInfo.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
++
+ 	if ( pDMA != nullptr )
+ 	{
+ 		assert( drmFormat == pDMA->format );
+@@ -2402,10 +2444,18 @@
+ 	VkMemoryRequirements memRequirements;
+ 	g_device.vk.GetImageMemoryRequirements(g_device.device(), m_vkImage, &memRequirements);
+ 
++	const bool bExportOnly = flags.bExportable && !flags.bFlippable && !flags.bMappable && pDMA == nullptr;
++
++	int32_t nMemoryType = -1;
++	if ( bExportOnly )
++		nMemoryType = g_device.findMemoryType( properties, memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT );
++	if ( nMemoryType < 0 )
++		nMemoryType = g_device.findMemoryType( properties, memRequirements.memoryTypeBits );
++
+ 	VkMemoryAllocateInfo allocInfo = {
+ 		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+ 		.allocationSize = memRequirements.size,
+-		.memoryTypeIndex = uint32_t(g_device.findMemoryType(properties, memRequirements.memoryTypeBits)),
++		.memoryTypeIndex = uint32_t(nMemoryType),
+ 	};
+ 
+ 	m_size = allocInfo.allocationSize;
+@@ -2845,6 +2895,18 @@
+ 	if ( m_pBackendFb != nullptr )
+ 		m_pBackendFb = nullptr;
+ 
++	if ( m_dmabufAliasBuffer != VK_NULL_HANDLE )
++	{
++		g_device.vk.DestroyBuffer( g_device.device(), m_dmabufAliasBuffer, nullptr );
++		m_dmabufAliasBuffer = VK_NULL_HANDLE;
++	}
++
++	if ( m_dmabufAliasMemory != VK_NULL_HANDLE )
++	{
++		g_device.vk.FreeMemory( g_device.device(), m_dmabufAliasMemory, nullptr );
++		m_dmabufAliasMemory = VK_NULL_HANDLE;
++	}
++
+ 	if ( m_vkImage != VK_NULL_HANDLE )
+ 	{
+ 		g_device.vk.DestroyImage( g_device.device(), m_vkImage, nullptr );
+@@ -2860,6 +2922,93 @@
+ 	m_bInitialized = false;
+ }
+ 
++VkBuffer CVulkanTexture::dmabufBufferAlias()
++{
++	if ( m_dmabufAliasBuffer != VK_NULL_HANDLE || m_dmabuf.n_planes < 1 )
++		return m_dmabufAliasBuffer;
++
++	const VkExternalMemoryBufferCreateInfo externalInfo = {
++		.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
++		.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
++	};
++	const VkBufferCreateInfo bufferInfo = {
++		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
++		.pNext = &externalInfo,
++		.size = m_size,
++		.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
++	};
++	VkBuffer buffer = VK_NULL_HANDLE;
++	VkResult res = g_device.vk.CreateBuffer( g_device.device(), &bufferInfo, nullptr, &buffer );
++	if ( res != VK_SUCCESS )
++	{
++		vk_errorf( res, "dmabuf alias vkCreateBuffer failed" );
++		return VK_NULL_HANDLE;
++	}
++
++	VkMemoryRequirements memRequirements;
++	g_device.vk.GetBufferMemoryRequirements( g_device.device(), buffer, &memRequirements );
++
++	const int fd = dup( m_dmabuf.fd[0] );
++	if ( fd < 0 )
++	{
++		vk_log.errorf_errno( "dmabuf alias dup failed" );
++		g_device.vk.DestroyBuffer( g_device.device(), buffer, nullptr );
++		return VK_NULL_HANDLE;
++	}
++
++	VkMemoryFdPropertiesKHR fdProperties = {
++		.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
++	};
++	res = g_device.vk.GetMemoryFdPropertiesKHR( g_device.device(), VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fd, &fdProperties );
++	const uint32_t uImportableTypes = res == VK_SUCCESS ? memRequirements.memoryTypeBits & fdProperties.memoryTypeBits : 0;
++
++	int32_t nMemoryType = g_device.findMemoryType( VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, uImportableTypes );
++	if ( nMemoryType < 0 )
++		nMemoryType = g_device.findMemoryType( 0, uImportableTypes );
++	if ( nMemoryType < 0 )
++	{
++		vk_log.errorf( "dmabuf alias: no importable memory type" );
++		close( fd );
++		g_device.vk.DestroyBuffer( g_device.device(), buffer, nullptr );
++		return VK_NULL_HANDLE;
++	}
++
++	VkImportMemoryFdInfoKHR importInfo = {
++		.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
++		.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
++		.fd = fd,
++	};
++	const VkMemoryAllocateInfo allocInfo = {
++		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++		.pNext = &importInfo,
++		.allocationSize = memRequirements.size,
++		.memoryTypeIndex = uint32_t( nMemoryType ),
++	};
++	VkDeviceMemory memory = VK_NULL_HANDLE;
++	res = g_device.vk.AllocateMemory( g_device.device(), &allocInfo, nullptr, &memory );
++	if ( res != VK_SUCCESS )
++	{
++		vk_errorf( res, "dmabuf alias vkAllocateMemory failed" );
++		close( fd );
++		g_device.vk.DestroyBuffer( g_device.device(), buffer, nullptr );
++		return VK_NULL_HANDLE;
++	}
++
++	res = g_device.vk.BindBufferMemory( g_device.device(), buffer, memory, 0 );
++	if ( res != VK_SUCCESS )
++	{
++		vk_errorf( res, "dmabuf alias vkBindBufferMemory failed" );
++		g_device.vk.FreeMemory( g_device.device(), memory, nullptr );
++		g_device.vk.DestroyBuffer( g_device.device(), buffer, nullptr );
++		return VK_NULL_HANDLE;
++	}
++
++	m_dmabufAliasBuffer = buffer;
++	m_dmabufAliasMemory = memory;
++	return m_dmabufAliasBuffer;
++}
++
+ int CVulkanTexture::memoryFence()
+ {
+ 	const VkMemoryGetFdInfoKHR memory_get_fd_info = {
+@@ -3829,7 +3978,7 @@
+ 	g_device.garbageCollect();
+ }
+ 
+-static gamescope::Rc<CVulkanTexture> acquire_pooled_texture( auto& pool, uint32_t width, uint32_t height, bool exportable, uint32_t drmFormat, EStreamColorspace colorspace )
++static gamescope::Rc<CVulkanTexture> acquire_pooled_texture( auto& pool, uint32_t width, uint32_t height, bool exportable, bool mappable, uint32_t drmFormat, EStreamColorspace colorspace )
+ {
+ 	for (auto& pTexture : pool)
+ 	{
+@@ -3847,11 +3996,11 @@
+ 			pTexture = new CVulkanTexture();
+ 
+ 			CVulkanTexture::createFlags textureFlags;
+-			textureFlags.bMappable = true;
++			textureFlags.bMappable = mappable;
+ 			textureFlags.bTransferDst = true;
+ 			textureFlags.bStorage = true;
+ 			textureFlags.bSampled = true; // required for RGB-to-NV12 shader to sample this texture
+-			if (exportable || drmFormat == DRM_FORMAT_NV12) {
++			if (exportable || (mappable && drmFormat == DRM_FORMAT_NV12)) {
+ 				textureFlags.bExportable = true;
+ 				textureFlags.bLinear = true; // TODO: support multi-planar DMA-BUF export via PipeWire
+ 			}
+@@ -3876,7 +4025,7 @@
+ 
+ gamescope::Rc<CVulkanTexture> vulkan_acquire_screenshot_texture(uint32_t width, uint32_t height, bool exportable, uint32_t drmFormat, EStreamColorspace colorspace)
+ {
+-	auto texture = acquire_pooled_texture(g_output.pScreenshotTextures, width, height, exportable, drmFormat, colorspace);
++	auto texture = acquire_pooled_texture(g_output.pScreenshotTextures, width, height, exportable, true, drmFormat, colorspace);
+ 	if (!texture)
+ 		vk_log.errorf("Unable to acquire screenshot texture. Out of textures.");
+ 	return texture;
+@@ -3884,7 +4033,7 @@
+ 
+ gamescope::Rc<CVulkanTexture> vulkan_acquire_capture_texture(uint32_t width, uint32_t height, bool exportable, uint32_t drmFormat, EStreamColorspace colorspace)
+ {
+-	auto texture = acquire_pooled_texture(g_output.pCaptureTextures, width, height, exportable, drmFormat, colorspace);
++	auto texture = acquire_pooled_texture(g_output.pCaptureTextures, width, height, exportable, false, drmFormat, colorspace);
+ 	if (!texture)
+ 		vk_log.errorf("Unable to acquire capture texture. Out of textures.");
+ 	return texture;
+@@ -3896,14 +4045,13 @@
+ {
+ 	static uint32_t s_uFormat = []()
+ 	{
+-		// Pooled capture textures are mappable, hence linear-tiled.
+ 		VkFormatProperties props;
+ 		g_device.vk.GetPhysicalDeviceFormatProperties( g_device.physDev(), VK_FORMAT_A2R10G10B10_UNORM_PACK32, &props );
+ 		constexpr VkFormatFeatureFlags uNeeded = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+-		if ( ( props.linearTilingFeatures & uNeeded ) == uNeeded )
++		if ( ( props.optimalTilingFeatures & uNeeded ) == uNeeded )
+ 			return DRM_FORMAT_XRGB2101010;
+ 
+-		vk_log.infof( "XRGB2101010 lacks linear storage/sampled support, capturing as XBGR2101010" );
++		vk_log.infof( "XRGB2101010 lacks storage/sampled support, capturing as XBGR2101010" );
+ 		return DRM_FORMAT_XBGR2101010;
+ 	}();
+ 	return s_uFormat;
+@@ -4197,6 +4345,57 @@
+ 	}
+ }
+ 
++static VkSubresourceLayout plane_layout( CVulkanTexture *pTexture, VkImageAspectFlagBits ePlane )
++{
++	const VkImageSubresource subresource = { .aspectMask = VkImageAspectFlags( ePlane ) };
++	VkSubresourceLayout layout = {};
++	g_device.vk.GetImageSubresourceLayout( g_device.device(), pTexture->vkImage(), &subresource, &layout );
++	return layout;
++}
++
++static void copy_nv12_to_export( CVulkanCmdBuffer *pCmdBuffer, gamescope::Rc<CVulkanTexture> pSource, gamescope::Rc<CVulkanTexture> pExport )
++{
++	const uint32_t uWidth = pExport->width();
++	const uint32_t uHeight = pExport->height();
++
++	VkBuffer exportBuffer = pExport->dmabufBufferAlias();
++	if ( exportBuffer == VK_NULL_HANDLE )
++	{
++		const VkImageCopy planes[2] = {
++			{
++				.srcSubresource = { .aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT, .layerCount = 1 },
++				.dstSubresource = { .aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT, .layerCount = 1 },
++				.extent = { uWidth, uHeight, 1 },
++			},
++			{
++				.srcSubresource = { .aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT, .layerCount = 1 },
++				.dstSubresource = { .aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT, .layerCount = 1 },
++				.extent = { uWidth / 2, uHeight / 2, 1 },
++			},
++		};
++		pCmdBuffer->copyImageRegions( pSource, pExport, planes );
++		return;
++	}
++
++	const VkSubresourceLayout lumaLayout = plane_layout( pExport.get(), VK_IMAGE_ASPECT_PLANE_0_BIT );
++	const VkSubresourceLayout chromaLayout = plane_layout( pExport.get(), VK_IMAGE_ASPECT_PLANE_1_BIT );
++	const VkBufferImageCopy planes[2] = {
++		{
++			.bufferOffset = lumaLayout.offset,
++			.bufferRowLength = uint32_t( lumaLayout.rowPitch ),
++			.imageSubresource = { .aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT, .layerCount = 1 },
++			.imageExtent = { uWidth, uHeight, 1 },
++		},
++		{
++			.bufferOffset = chromaLayout.offset,
++			.bufferRowLength = uint32_t( chromaLayout.rowPitch / 2 ),
++			.imageSubresource = { .aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT, .layerCount = 1 },
++			.imageExtent = { uWidth / 2, uHeight / 2, 1 },
++		},
++	};
++	pCmdBuffer->copyImageToExternalBuffer( pSource, exportBuffer, planes );
++}
++
+ std::optional<uint64_t> vulkan_screenshot( const struct FrameInfo_t *frameInfo, gamescope::Rc<CVulkanTexture> pScreenshotTexture, gamescope::Rc<CVulkanTexture> pYUVOutTexture )
+ {
+ 	EOTF outputTF = frameInfo->outputEncodingEOTF;
+@@ -4213,6 +4412,14 @@
+ 	cmdBuffer->bindTarget(pScreenshotTexture);
+ 	cmdBuffer->uploadConstants<BlitPushData_t>(frameInfo);
+ 
++	gamescope::Rc<CVulkanTexture> pNV12Target = pYUVOutTexture;
++	if ( pYUVOutTexture != nullptr && pYUVOutTexture->externalImage() )
++	{
++		pNV12Target = vulkan_acquire_capture_texture( pYUVOutTexture->width(), pYUVOutTexture->height(), false, DRM_FORMAT_NV12 );
++		if ( pNV12Target == nullptr )
++			pNV12Target = pYUVOutTexture;
++	}
++
+ 	const int pixelsPerGroup = 8;
+ 
+ 	cmdBuffer->dispatch(div_roundup(currentOutputWidth, pixelsPerGroup), div_roundup(currentOutputHeight, pixelsPerGroup));
+@@ -4238,7 +4445,7 @@
+ 		{
+ 			cmdBuffer->bindTexture(i, nullptr);
+ 		}
+-		cmdBuffer->bindTarget(pYUVOutTexture);
++		cmdBuffer->bindTarget(pNV12Target);
+ 
+ 		const int pixelsPerGroup = 8;
+ 
+@@ -4248,6 +4455,9 @@
+ 		cmdBuffer->dispatch(div_roundup(pYUVOutTexture->width(), dispatchSize), div_roundup(pYUVOutTexture->height(), dispatchSize));
+ 	}
+ 
++	if ( pNV12Target != pYUVOutTexture )
++		copy_nv12_to_export( cmdBuffer.get(), pNV12Target, pYUVOutTexture );
++
+ 	uint64_t sequence = g_device.submit(std::move(cmdBuffer));
+ 	return sequence;
+ }
+--- a/src/rendervulkan.hpp
++++ b/src/rendervulkan.hpp
+@@ -206,6 +206,7 @@
+ 	}
+ 
+ 	int memoryFence();
++	VkBuffer dmabufBufferAlias();
+ 
+ 	CVulkanTexture( void );
+ 	~CVulkanTexture( void );
+@@ -222,7 +223,10 @@
+ 
+ 	VkImage m_vkImage = VK_NULL_HANDLE;
+ 	VkDeviceMemory m_vkImageMemory = VK_NULL_HANDLE;
+-	
++
++	VkBuffer m_dmabufAliasBuffer = VK_NULL_HANDLE;
++	VkDeviceMemory m_dmabufAliasMemory = VK_NULL_HANDLE;
++
+ 	VkImageView m_srgbView = VK_NULL_HANDLE;
+ 	VkImageView m_linearView = VK_NULL_HANDLE;
+ 
+@@ -603,7 +607,7 @@
+ 	uint32_t uOutputFormatOverlay = DRM_FORMAT_INVALID;
+ 
+ 	std::array<gamescope::OwningRc<CVulkanTexture>, 2> pScreenshotTextures;
+-	std::array<gamescope::OwningRc<CVulkanTexture>, 2> pCaptureTextures;
++	std::array<gamescope::OwningRc<CVulkanTexture>, 4> pCaptureTextures;
+ 
+ 	// NIS and FSR
+ 	gamescope::OwningRc<CVulkanTexture> tmpOutput;
+@@ -750,6 +754,7 @@
+ 	VK_FUNC(CmdClearColorImage) \
+ 	VK_FUNC(CmdCopyBufferToImage) \
+ 	VK_FUNC(CmdCopyImage) \
++	VK_FUNC(CmdCopyImageToBuffer) \
+ 	VK_FUNC(CmdDispatch) \
+ 	VK_FUNC(CmdDraw) \
+ 	VK_FUNC(CmdEndRendering) \
+@@ -795,6 +800,7 @@
+ 	VK_FUNC(GetImageMemoryRequirements) \
+ 	VK_FUNC(GetImageSubresourceLayout) \
+ 	VK_FUNC(GetMemoryFdKHR) \
++	VK_FUNC(GetMemoryFdPropertiesKHR) \
+ 	VK_FUNC(GetQueryPoolResults) \
+ 	VK_FUNC(GetSemaphoreCounterValue) \
+ 	VK_FUNC(GetSwapchainImagesKHR) \
+@@ -841,8 +847,7 @@
+ 
+ 	VkSampler sampler(SamplerState key);
+ 	VkPipeline pipeline(ShaderType type, uint32_t layerCount = 1, uint32_t ycbcrMask = 0, uint32_t blur_layers = 0, uint32_t colorspace_mask = 0, uint32_t output_eotf = EOTF_Gamma22, bool itm_enable = false);
+-	int32_t findMemoryType( VkMemoryPropertyFlags properties, uint32_t requiredTypeBits );
+-	std::unique_ptr<CVulkanCmdBuffer> commandBuffer();
++	int32_t findMemoryType( VkMemoryPropertyFlags properties, uint32_t requiredTypeBits, VkMemoryPropertyFlags excludedProperties = 0 );	std::unique_ptr<CVulkanCmdBuffer> commandBuffer();
+ 	uint64_t submit( std::unique_ptr<CVulkanCmdBuffer> cmdBuf);
+ 	uint64_t submitInternal( CVulkanCmdBuffer* cmdBuf );
+ 	void wait(uint64_t sequence, bool reset = true);
+@@ -1017,6 +1022,7 @@
+ 	void copyImage(gamescope::Rc<CVulkanTexture> src, gamescope::Rc<CVulkanTexture> dst);
+ 	void copyImageRegions(gamescope::Rc<CVulkanTexture> src, gamescope::Rc<CVulkanTexture> dst, std::span<const VkImageCopy> regions);
+ 	void copyBufferToImage(VkBuffer buffer, VkDeviceSize offset, uint32_t stride, gamescope::Rc<CVulkanTexture> dst);
++	void copyImageToExternalBuffer(gamescope::Rc<CVulkanTexture> src, VkBuffer dst, std::span<const VkBufferImageCopy> regions);
+ 	void clearImage(gamescope::Rc<CVulkanTexture> dst, const VkClearColorValue &color);
+ 
+ 

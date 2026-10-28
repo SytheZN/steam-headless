@@ -9,7 +9,7 @@ Containerized Steam with gamescope for remote gaming via Steam Remote Play.
 
 ## Quick start
 
-First run — opens a visible desktop session to log into Steam:
+First run — opens a visible desktop session to log into Steam and optionally pair Steam Link:
 
 ```bash
 ./launch -b sdl -s desktop

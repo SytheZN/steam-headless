@@ -55,6 +55,13 @@ case "${GAMESCOPE_RESOLUTION:-1080p}" in
 esac
 log "start" "Resolution: ${GAMESCOPE_RESOLUTION:-1080p} (${GS_WIDTH}x${GS_HEIGHT})"
 
+GS_FRAMERATE="${GAMESCOPE_FRAMERATE:-60}"
+if ! [[ "$GS_FRAMERATE" =~ ^[1-9][0-9]*$ ]]; then
+    log "start" "Invalid framerate '${GAMESCOPE_FRAMERATE}', defaulting to 60"
+    GS_FRAMERATE=60
+fi
+log "start" "Framerate: ${GS_FRAMERATE}Hz"
+
 # Build gamescope debug flags
 GAMESCOPE_DEBUG_FLAGS=""
 if csvhas focus "$HEADLESS_DEBUG"; then
@@ -76,6 +83,6 @@ exec gamescope \
     --mangoapp \
     --prefer-vk-device /dev/dri/renderD128 \
     -W $GS_WIDTH -H $GS_HEIGHT \
-    -r 60 \
+    -r $GS_FRAMERATE \
     $GAMESCOPE_DEBUG_FLAGS \
     -- session-manager
