@@ -1,0 +1,43 @@
+#!/bin/bash
+
+BOOTSTRAP_LOG="/home/steam/.local/share/Steam/logs/bootstrap_log.txt"
+STEP_PERCENT=5
+
+last_total=""
+last_step=-1
+
+exec 3< <(exec tail -F -n0 "$BOOTSTRAP_LOG" 2>/dev/null)
+tail_pid=$!
+trap 'kill "$tail_pid" 2>/dev/null; exit 0' TERM INT
+
+while IFS= read -r -u 3 line; do
+    text="${line#\[*\] }"
+    text="${text%...}"
+
+    if [[ "$text" =~ ^Downloading\ update\ \(([0-9]+)\ of\ ([0-9]+)\ KB\) ]]; then
+        done_kb="${BASH_REMATCH[1]}"
+        total_kb="${BASH_REMATCH[2]}"
+        [ "$total_kb" -gt 0 ] || continue
+
+        if [ "$total_kb" != "$last_total" ]; then
+            last_total="$total_kb"
+            last_step=-1
+        fi
+
+        percent=$((done_kb * 100 / total_kb))
+        step=$((percent / STEP_PERCENT))
+        if [ "$step" -gt "$last_step" ]; then
+            last_step="$step"
+            log "steam-update" "downloading $((done_kb / 1024)) of $((total_kb / 1024)) MB ($percent%)"
+        fi
+        continue
+    fi
+
+    case "${text,,}" in
+        "failed to load cached hosts file"*)
+            ;;
+        "downloading update"*|"downloaded new manifest"*|"download complete"*|"extracting package"*|"installing update"*|"update complete"*|*error*|*failed*)
+            log "steam-update" "$text"
+            ;;
+    esac
+done

@@ -1,4 +1,4 @@
 wlr-randr --output WL-1 --custom-mode 1920x1080 &
 swaybg -c '#262624' &
 waybar &
-steam && switch-session steam &
+env -u GAMESCOPE_WAYLAND_DISPLAY -u ENABLE_GAMESCOPE_WSI -u GAMESCOPE_LIMITER_FILE steam -steamdeck && switch-session steam &

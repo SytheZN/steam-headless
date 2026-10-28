@@ -18,4 +18,4 @@ END {
     if (count > 1) {
         print "... repeated x" count
     }
-}' ./steam-data/logs/uinput.log > ./steam-data/logs/uinput_summary.log
+}' ./steam-data/steam/logs/uinput.log > ./steam-data/steam/logs/uinput_summary.log

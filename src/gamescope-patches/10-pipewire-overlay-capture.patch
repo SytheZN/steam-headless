@@ -1,0 +1,49 @@
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+index 4ed85258..b0d07531 100644
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -2947,6 +2947,7 @@ static void paint_pipewire()
+ 	static uint64_t s_ulLastOverrideCommitId = 0;
+ 	static uint64_t s_ulLastUnderlayCommitId = 0;
+ 	static uint64_t s_ulLastDecorationCommitId = 0;
++	static uint64_t s_ulLastOverlayCommitId = 0;
+ 
+ 	uint64_t ulFocusCommitId = window_last_done_commit_id( pFocus->focusWindow );
+ 	uint64_t ulOverrideCommitId = window_last_done_commit_id( pFocus->overrideWindow );
+@@ -2960,16 +2961,24 @@ static void paint_pipewire()
+ 	for ( steamcompmgr_win_t *decoration : pFocus->decorationWindows )
+ 		ulDecorationCommitId = ulDecorationCommitId * 31 + window_last_done_commit_id( decoration );
+ 
++	global_focus_t *pGlobalFocus = GetCurrentFocus();
++	steamcompmgr_win_t *pOverlay = pGlobalFocus ? pGlobalFocus->overlayWindow : nullptr;
++	steamcompmgr_win_t *pExternalOverlay = pGlobalFocus && pGlobalFocus->externalOverlayWindow && pGlobalFocus->externalOverlayWindow->opacity
++		? pGlobalFocus->externalOverlayWindow : nullptr;
++	uint64_t ulOverlayCommitId = window_last_done_commit_id( pOverlay ) * 31 + window_last_done_commit_id( pExternalOverlay );
++
+ 	if ( ulFocusCommitId == s_ulLastFocusCommitId &&
+ 	     ulOverrideCommitId == s_ulLastOverrideCommitId &&
+ 	     ulUnderlayCommitId == s_ulLastUnderlayCommitId &&
+-	     ulDecorationCommitId == s_ulLastDecorationCommitId )
++	     ulDecorationCommitId == s_ulLastDecorationCommitId &&
++	     ulOverlayCommitId == s_ulLastOverlayCommitId )
+ 		return;
+ 
+ 	s_ulLastFocusCommitId = ulFocusCommitId;
+ 	s_ulLastOverrideCommitId = ulOverrideCommitId;
+ 	s_ulLastUnderlayCommitId = ulUnderlayCommitId;
+ 	s_ulLastDecorationCommitId = ulDecorationCommitId;
++	s_ulLastOverlayCommitId = ulOverlayCommitId;
+ 
+ 	uint32_t uWidth = s_pPipewireBuffer->texture->width();
+ 	uint32_t uHeight = s_pPipewireBuffer->texture->height();
+@@ -3014,6 +3023,10 @@ static void paint_pipewire()
+ 				( cv_overlay_unmultiplied_alpha ? PaintWindowFlag::CoverageMode : 0 )  );
+ 	}
+ 
++	if ( pExternalOverlay && frameInfo.layers.count() < k_nMaxLayers )
++		paint_window( pFocus, pExternalOverlay, pExternalOverlay, &frameInfo, nullptr, PaintWindowFlag::NoScale | PaintWindowFlag::NoFilter |
++				( cv_overlay_unmultiplied_alpha ? PaintWindowFlag::CoverageMode : 0 ) );
++
+ 	gamescope::Rc<CVulkanTexture> pRGBTexture = s_pPipewireBuffer->texture->isYcbcr()
+ 		? vulkan_acquire_capture_texture( uWidth, uHeight, false, vulkan_get_rgb10_capture_format() )
+ 		: gamescope::Rc<CVulkanTexture>{ s_pPipewireBuffer->texture };

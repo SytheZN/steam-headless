@@ -33,7 +33,7 @@
   "custom/steam": {
     "format": "Steam",
     "tooltip": false,
-    "on-click": "steam"
+    "on-click": "env -u GAMESCOPE_WAYLAND_DISPLAY -u ENABLE_GAMESCOPE_WSI -u GAMESCOPE_LIMITER_FILE steam -steamdeck"
   },
   "custom/left-arrow-dark": {
     "format": "",

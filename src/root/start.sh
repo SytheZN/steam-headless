@@ -15,6 +15,18 @@ until [ -S /tmp/uinput-proxy.sock ]; do sleep 0.1; done
 
 export $(dbus-launch)
 
+saved_zone=$(cat /home/steam/.steam/timezone 2>/dev/null || true)
+if settz "${saved_zone:-UTC}"; then
+    log "start" "Time zone: ${saved_zone:-UTC}"
+else
+    settz UTC
+    log "start" "Time zone '${saved_zone}' invalid, using UTC"
+fi
+
+rm -f /run/dbus/system_bus_socket
+dbus-daemon --config-file=/etc/dbus-1/headless-system.conf --fork --nopidfile
+fake-systemd &
+
 # In headless mode, don't connect to host audio
 if [ "${GAMESCOPE_BACKEND:-headless}" = "headless" ]; then
     unset PULSE_SERVER
@@ -61,6 +73,7 @@ exec gamescope \
     --steam \
     --backend ${GAMESCOPE_BACKEND:-headless} \
     --xwayland-count 1 \
+    --mangoapp \
     --prefer-vk-device /dev/dri/renderD128 \
     -W $GS_WIDTH -H $GS_HEIGHT \
     -r 60 \

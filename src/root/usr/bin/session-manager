@@ -30,11 +30,17 @@ while [ -f "$SESSION_FILE" ]; do
     log "session-manager" "Launching session: $next_session"
     case "$next_session" in
         steam)
-            steam -bigpicture -steamos3
+            steam-update-progress &
+            update_progress_pid=$!
+            steam -gamepadui -steamos3 -steampal -steamdeck
+            kill "$update_progress_pid" 2>/dev/null
+            wait "$update_progress_pid" 2>/dev/null
             log "session-manager" "Steam exited"
             ;;
         desktop)
             launcher env \
+            -u STEAM_USE_MANGOAPP \
+            XDG_CURRENT_DESKTOP=labwc \
             WAYLAND_DISPLAY="$GAMESCOPE_WAYLAND_DISPLAY" \
             WLR_BACKENDS=wayland \
             WLR_NO_HARDWARE_CURSORS=1 \

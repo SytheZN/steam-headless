@@ -7,6 +7,7 @@ GAMESCOPE_BACKEND=""
 GAMESCOPE_RESOLUTION=""
 DEFAULT_SESSION=""
 HEADLESS_DEBUG=""
+FORCE_BUILD=""
 
 # Help message
 show_help() {
@@ -34,6 +35,8 @@ OPTIONS:
                              - uinputld: Enable uinput preload library debug logging
                              - uinput_extra: Enable extra intercepts and uevents
                              - ALL: Enable all debug flags
+    --build                  Build the image even if the compose stack names one
+                             (default: pull when an image is set, else build)
     -h, --help               Show this help message
 
 EXAMPLES:
@@ -50,7 +53,7 @@ EOF
 }
 
 # Parse arguments using getopt (supports long options)
-TEMP=$(getopt -o b:r:s:d:h --long backend:,resolution:,session:,debug:,help -n 'launch' -- "$@")
+TEMP=$(getopt -o b:r:s:d:h --long backend:,resolution:,session:,debug:,build,help -n 'launch' -- "$@")
 if [ $? != 0 ]; then
     echo >&2
     show_help
@@ -79,6 +82,10 @@ while true; do
                 HEADLESS_DEBUG="$2"
             fi
             shift 2
+            ;;
+        --build)
+            FORCE_BUILD=1
+            shift
             ;;
         -h|--help)
             show_help
@@ -115,13 +122,16 @@ else
 fi
 
 # Launch container
-rm -rf steam-data/logs
-mkdir -p steam-data/logs
-mkdir -p steam-home/.steam steam-home/wireplumber
+rm -rf steam-data/steam/logs
+mkdir -p steam-data/steam/logs steam-data/.steam steam-data/.wireplumber
 
 docker compose $COMPOSE_FILES down -v
 
-docker compose $COMPOSE_FILES build
+if [ -z "$FORCE_BUILD" ] && docker compose $COMPOSE_FILES config | grep -q -E '^\s+image:'; then
+    docker compose $COMPOSE_FILES pull
+else
+    docker compose $COMPOSE_FILES build
+fi
 
 GAMESCOPE_BACKEND="$GAMESCOPE_BACKEND" \
 GAMESCOPE_RESOLUTION="$GAMESCOPE_RESOLUTION" \

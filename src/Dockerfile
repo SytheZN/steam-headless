@@ -1,4 +1,16 @@
-FROM registry.fedoraproject.org/fedora:43 AS builder
+FROM registry.fedoraproject.org/fedora:44 AS sources
+
+RUN dnf install -y git && dnf clean all
+
+RUN git clone https://github.com/ValveSoftware/gamescope.git /gamescope
+
+WORKDIR /gamescope
+
+RUN git submodule update --init --recursive
+
+RUN git clone https://github.com/SytheZN/vaapi-vulkan-nvidia.git /vaapi-vulkan-nvidia
+
+FROM registry.fedoraproject.org/fedora:44 AS builder
 
 RUN dnf install -y \
     git \
@@ -7,9 +19,12 @@ RUN dnf install -y \
     gcc \
     gcc-c++ \
     glibc-devel.i686 \
+    libatomic \
+    libatomic.i686 \
     cmake \
     pipewire-devel \
-    hwdata \
+    'pkgconfig(hwdata)' \
+    'pkgconfig(libcap)' \
     libX11-devel \
     wayland-devel \
     wayland-protocols-devel \
@@ -44,14 +59,12 @@ RUN dnf install -y \
     libva-devel.i686 \
     && dnf clean all
 
-RUN git clone https://github.com/ValveSoftware/gamescope.git /gamescope
+COPY --from=sources /gamescope /gamescope
 
 WORKDIR /gamescope
 
-RUN git submodule update --init --recursive
-
 COPY gamescope-patches/ /tmp/gamescope-patches/
-RUN for patch in /tmp/gamescope-patches/*.patch; do git apply "$patch"; done
+RUN set -e; for patch in /tmp/gamescope-patches/*.patch; do git apply "$patch"; done
 
 # TEMPORARY INSTALLS FOR BUILD
 #RUN dnf install -y  && dnf clean all
@@ -70,11 +83,16 @@ WORKDIR /uinput-proxy
 RUN make dist
 
 # Build vaapi-vulkan-nvidia driver
-RUN git clone https://github.com/SytheZN/vaapi-vulkan-nvidia.git /vaapi-vulkan-nvidia
+COPY --from=sources /vaapi-vulkan-nvidia /vaapi-vulkan-nvidia
 WORKDIR /vaapi-vulkan-nvidia
 RUN make all
 
-FROM registry.fedoraproject.org/fedora:43 AS runtime
+# Build fake-systemd
+COPY fake-systemd/ /fake-systemd/
+WORKDIR /fake-systemd
+RUN make
+
+FROM registry.fedoraproject.org/fedora:44 AS runtime
 
 RUN dnf install -y \
     https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
@@ -84,6 +102,7 @@ RUN dnf install -y \
 RUN dnf install -y \
     steam \
     gamescope \
+    mangohud \
     pipewire-pulse \
     util-linux \
     dbus-daemon \
@@ -119,6 +138,11 @@ COPY --from=builder /uinput-proxy/dist/uinput/ /opt/uinput/
 COPY --from=builder /vaapi-vulkan-nvidia/out/build_x64/nvidia_vulkan_drv_video.so /usr/lib64/dri/nvidia_vulkan_drv_video.so
 COPY --from=builder /vaapi-vulkan-nvidia/out/build_i686/nvidia_vulkan_drv_video.so /usr/lib/dri/nvidia_vulkan_drv_video.so
 COPY --from=builder /vaapi-vulkan-nvidia/out/build_proxy/nvidia_vulkan_proxy /usr/lib64/nvidia_vulkan_proxy
+
+# Install fake-systemd
+COPY --from=builder /fake-systemd/fake-systemd /usr/local/bin/fake-systemd
+COPY --from=builder /fake-systemd/settz /usr/local/bin/
+RUN chmod 4755 /usr/local/bin/settz
 
 RUN touch /.container
 

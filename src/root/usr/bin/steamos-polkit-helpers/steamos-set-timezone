@@ -1,0 +1,12 @@
+#!/bin/bash
+
+zone="$1"
+
+if ! /usr/local/bin/settz "$zone"; then
+    log "steamos-set-timezone" "Rejected time zone '$zone'"
+    exit 1
+fi
+
+echo "$zone" > /home/steam/.steam/timezone
+log "steamos-set-timezone" "Time zone set to $zone, restarting Steam to apply"
+setsid bash -c 'sleep 1; switch-session steam' > /dev/null 2>&1 < /dev/null &

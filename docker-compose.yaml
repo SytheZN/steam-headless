@@ -18,12 +18,11 @@ services:
       - HEADLESS_DEBUG
 
     volumes:
-      - ./steam-data:/home/steam/.local/share/Steam:rw
-      - ./steam-home/.steam:/home/steam/.steam:rw
-      - ./steam-home/wireplumber:/home/steam/.local/state/wireplumber:rw
+      - ./steam-data/steam:/home/steam/.local/share/Steam:rw
+      - ./steam-data/.steam:/home/steam/.steam:rw
+      - ./steam-data/.wireplumber:/home/steam/.local/state/wireplumber:rw
       - /dev/dri:/dev/dri:rw
       - /run/user/1000/pulse:/tmp/pulse:rw
-      - /var/run/dbus:/var/run/dbus:rw
       - /run/user/1000/wayland-0:/tmp/runtime/host-wayland-0:rw
 
     devices:
@@ -31,8 +30,13 @@ services:
 
     shm_size: '2gb'
 
+    ulimits:
+      rtprio: 95
+      nice: 40
+
     cap_add:
       - SYS_ADMIN
+      - SYS_NICE
       # Only needed when running with debug=uinput_extra for uevent broadcasts
       #- NET_ADMIN
 
