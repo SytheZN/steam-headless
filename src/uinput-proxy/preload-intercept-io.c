@@ -35,7 +35,7 @@ int intercept_ioctl(int fd, unsigned long cmd, void *arg) {
             errno = EINVAL;
             return -1;
         }
-        vfd_table[fd].clock_type = clkid;
+        vfd_table[fd].reader->clock_type = clkid;
         return 0;
     }
 
@@ -107,14 +107,15 @@ int intercept_ioctl(int fd, unsigned long cmd, void *arg) {
      * The kernel does a per-type flush; we advance to packet_head as a
      * safe approximation. */
     if (vfd_is_active(fd) && vfd_table[fd].type == VFD_EVDEV &&
-            vfd_table[fd].shmem && r->ret >= 0 &&
+            vfd_table[fd].reader && r->ret >= 0 &&
             _IOC_TYPE(cmd) == 'E' && (
                 _IOC_NR(cmd) == _IOC_NR(EVIOCGKEY(0)) ||
                 _IOC_NR(cmd) == _IOC_NR(EVIOCGLED(0)) ||
                 _IOC_NR(cmd) == _IOC_NR(EVIOCGSW(0)))) {
-        uint64_t ph = atomic_load_explicit(&vfd_table[fd].shmem->packet_head,
-                                           memory_order_acquire);
-        vfd_table[fd].read_pos = ph;
+        struct evdev_reader *reader = vfd_table[fd].reader;
+        reader->read_pos = atomic_load_explicit(&reader->shmem->packet_head,
+                                                memory_order_acquire);
+        evdev_reader_sync_doorbell(reader);
     }
 
     return (int)r->ret;
@@ -134,17 +135,40 @@ ssize_t intercept_read(int fd, void *buf, size_t count) {
     struct virtual_fd *vf = &vfd_table[fd];
 
     if (vf->type == VFD_EVDEV) {
+        struct evdev_reader *reader = vf->reader;
+        if (count != 0 && count < sizeof(struct input_event)) { errno = EINVAL; return -1; }
+
         for (;;) {
-            uint64_t write_pos = atomic_load_explicit(&vf->shmem->write_pos,
+            if (evdev_socket_hung_up(fd)) { errno = ENODEV; return -1; }
+
+            bool has_packet = evdev_reader_has_packet(reader);
+            if (!has_packet && (vf->flags & O_NONBLOCK)) { errno = EAGAIN; return -1; }
+            if (count == 0) return 0;
+
+            if (!has_packet) {
+                /* FUTEX_WAIT without a timeout returns -ERESTARTSYS when a signal
+                 * arrives, so the kernel restarts it after an SA_RESTART handler,
+                 * matching evdev_read()'s wait_event_interruptible(). seq is read
+                 * before the packet/hang-up checks so a wake between them is not lost. */
+                uint32_t seq = atomic_load_explicit(&reader->shmem->wake_seq,
+                                                    memory_order_acquire);
+                if (evdev_reader_has_packet(reader) || evdev_socket_hung_up(fd)) continue;
+                if (syscall(SYS_futex, &reader->shmem->wake_seq, FUTEX_WAIT,
+                            seq, NULL, NULL, 0) < 0 && errno == EINTR)
+                    return -1;
+                continue;
+            }
+
+            uint64_t write_pos = atomic_load_explicit(&reader->shmem->write_pos,
                                                        memory_order_acquire);
-            if (write_pos - vf->read_pos > EVDEV_RING_FRAMES) {
+            if (write_pos - reader->read_pos > EVDEV_RING_FRAMES) {
                 /* Overflow: daemon lapped us. Skip to newest packet. */
-                uint64_t packet_head = atomic_load_explicit(&vf->shmem->packet_head,
+                uint64_t packet_head = atomic_load_explicit(&reader->shmem->packet_head,
                                                              memory_order_acquire);
                 uint64_t oldest_valid = write_pos - EVDEV_RING_FRAMES;
-                vf->read_pos = (packet_head > oldest_valid) ? packet_head : oldest_valid;
+                reader->read_pos = (packet_head > oldest_valid) ? packet_head : oldest_valid;
+                evdev_reader_sync_doorbell(reader);
 
-                if (count < sizeof(struct input_event)) { errno = EINVAL; return -1; }
                 struct input_event ev;
                 struct timespec ts;
                 clock_gettime(CLOCK_REALTIME, &ts);
@@ -157,47 +181,24 @@ ssize_t intercept_read(int fd, void *buf, size_t count) {
                 return sizeof(struct input_event);
             }
 
-            uint64_t packet_head = atomic_load_explicit(&vf->shmem->packet_head,
+            uint64_t packet_head = atomic_load_explicit(&reader->shmem->packet_head,
                                                          memory_order_acquire);
-
-            if (packet_head == vf->read_pos) {
-                if (vf->flags & O_NONBLOCK) { errno = EAGAIN; return -1; }
-
-                uint32_t seq = atomic_load_explicit(&vf->shmem->wake_seq,
-                                                    memory_order_acquire);
-                packet_head = atomic_load_explicit(&vf->shmem->packet_head,
-                                                   memory_order_acquire);
-                if (packet_head != vf->read_pos) continue;
-
-                struct timespec ts = { .tv_sec = 3, .tv_nsec = 0 };
-                long rc = syscall(SYS_futex, &vf->shmem->wake_seq, FUTEX_WAIT,
-                                  seq, &ts, NULL, 0);
-                if (rc < 0 && errno == EINTR) { return -1; }
-                if (rc < 0 && errno == ETIMEDOUT) {
-                    struct timespec now;
-                    clock_gettime(CLOCK_MONOTONIC, &now);
-                    uint64_t hb = atomic_load_explicit(&vf->shmem->heartbeat,
-                                                       memory_order_relaxed);
-                    if ((uint64_t)now.tv_sec - hb > HEARTBEAT_TIMEOUT_SEC) { errno = EIO; return -1; }
-                }
-                continue;
-            }
-
-            uint64_t avail_frames = packet_head - vf->read_pos;
+            uint64_t avail_frames = packet_head - reader->read_pos;
             uint64_t want = count / sizeof(struct input_event);
             uint64_t nframes = avail_frames < want ? avail_frames : want;
 
             uint8_t *dst = buf;
             for (uint64_t i = 0; i < nframes; i++) {
-                wire_to_native(vf->shmem->buf + FRAME_RING_BYTE(vf->read_pos),
+                wire_to_native(reader->shmem->buf + FRAME_RING_BYTE(reader->read_pos),
                                (struct input_event *)dst);
                 dst += sizeof(struct input_event);
-                vf->read_pos++;
+                reader->read_pos++;
             }
+            evdev_reader_sync_doorbell(reader);
 
             /* Re-stamp events if reader requested CLOCK_MONOTONIC.
              * The ring stores CLOCK_REALTIME timestamps. */
-            if (vf->clock_type != CLOCK_REALTIME) {
+            if (reader->clock_type != CLOCK_REALTIME) {
                 struct timespec rt, mono;
                 clock_gettime(CLOCK_REALTIME,  &rt);
                 clock_gettime(CLOCK_MONOTONIC, &mono);

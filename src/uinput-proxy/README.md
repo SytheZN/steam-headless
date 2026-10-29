@@ -10,26 +10,27 @@ Lets unprivileged processes create and consume virtual input devices without acc
 
 ### `uinput-daemon`
 
-A privileged daemon (`daemon.c`, `daemon-helpers.c`) that:
+A privileged daemon (`daemon.c`, `daemon-helpers.c`, `daemon-ioctl.c`, `daemon-sysfs.c`) that:
 
 - Listens on a Unix socket at `/tmp/uinput-proxy.sock`
 - Manages up to 8 virtual device slots with full capability state (evbit, keybit, absbit, relbit, ffbit, mscbit, swbit, ledbit, sndbit, propbit)
 - Creates real `mknod` device stubs at `/dev/input/eventN` so that directory enumeration works
-- Owns a shared-memory ring buffer (memfd) per device for zero-copy event broadcast to readers
+- Owns a shared-memory ring buffer (memfd) per device for zero-copy event broadcast to readers, and a doorbell eventfd per reader that is readable while the reader has unread packets
+- Timestamps each packet as the kernel does: the last valid writer timestamp in the packet, otherwise the time of the `SYN_REPORT`
 - Tracks live device state (key/LED/switch positions, absinfo values) for `EVIOCGKEY`/`EVIOCGLED`/`EVIOCGSW` queries
 - Writes synthetic udev database entries (`/run/udev/data/c13:*`) with auto-detected device type (gamepad, joystick, mouse, keyboard)
+- Maintains a sysfs mirror of the virtual devices under `/tmp/uinput/sysfs`
 - Optionally sends `AF_NETLINK` kobject uevents (add/remove) when `UINPUT_EXTRA` is set
-- Implements a 1-second heartbeat timer per device for liveness detection
 - Applies a 2-second cooldown on device slots after destruction to prevent reuse races
 - Handles graceful shutdown on SIGTERM/SIGINT, cleaning up all devices
 
 ### `uinput-preload.so`
 
-An `LD_PRELOAD` library (`preload.c`, `preload-helpers.c`, `preload-intercepts.c`) that intercepts syscalls to transparently redirect input device access through the daemon.
+An `LD_PRELOAD` library (`preload.c`, `preload-helpers.c`, `preload-sysfs.c`, `preload-intercept-*.c`) that intercepts syscalls to transparently redirect input device access through the daemon.
 
 Built in two variants:
-- **Standard** (`uinput-preload.so`) — intercepts `open`, `close`, `read`, `write`, `ioctl`, `fcntl`, `opendir`/`readdir`/`closedir`, `stat`, `access`, `poll`
-- **Extra** (`uinput-preload.extra.so`, with `-DUINPUT_EXTRA_INTERCEPTS`) — additionally intercepts `openat`/`openat64`, `dup`/`dup2`/`dup3`, `lstat`, `fstat`/`fstat64`/`__fxstat`/`__fxstat64`, `stat64`/`lstat64`/`__xstat`/`__lxstat`/`__xstat64`/`__lxstat64`, `faccessat`, `readlink`, `ppoll`, `select`/`pselect`, `epoll_ctl`/`epoll_wait`/`epoll_pwait`, `inotify_init`/`inotify_init1`/`inotify_add_watch`/`inotify_rm_watch`, `writev`, `splice`, `sendfile`/`sendfile64`, `pwrite`/`pwrite64`
+- **Standard** (`uinput-preload.so`) — intercepts `open`/`open64`/`openat`/`openat64` (and their fortified `__open_2`/`__open64_2`/`__openat_2`/`__openat64_2` forms), `close`, `read`, `write`, `ioctl`, `fcntl`, `dup`/`dup2`/`dup3`, `opendir`, `scandir`/`scandir64`, `fopen`/`fopen64`, `stat`/`lstat`/`stat64`/`lstat64`/`__xstat`/`__lxstat`/`__xstat64`/`__lxstat64`, `fstat`/`fstat64`/`__fxstat`/`__fxstat64`, `fstatat`/`fstatat64`/`__fxstatat`/`__fxstatat64`, `statx`, `fstatfs`/`fstatfs64`, `access`, `faccessat`, `readlink`/`readlinkat`/`__readlinkat_chk`, `realpath`/`__realpath_chk`, `poll`/`ppoll`, `select`/`pselect`, `epoll_ctl`/`epoll_wait`/`epoll_pwait`
+- **Extra** (`uinput-preload.extra.so`, with `-DUINPUT_EXTRA_INTERCEPTS`) — additionally intercepts `inotify_init`/`inotify_init1`/`inotify_add_watch`/`inotify_rm_watch`, `writev`, `splice`, `sendfile`/`sendfile64`, `pwrite`/`pwrite64` for logging
 
 Both variants are built for x86_64 and i686 (32-bit).
 
@@ -37,7 +38,7 @@ Self-disables when running inside the daemon process itself (detected via `prctl
 
 ### `uinput-install`
 
-A helper binary that appends the preload library to `/etc/ld.so.preload` using `$LIB` for automatic multilib resolution and prints the corresponding `LD_PRELOAD` export.
+A helper binary that appends the preload library to `/etc/ld.so.preload` using `$LIB` for automatic multilib resolution and prints the corresponding `LD_PRELOAD` and `UINPUT_PRELOAD` exports.
 
 ## How it works
 
@@ -45,49 +46,46 @@ A helper binary that appends the preload library to `/etc/ld.so.preload` using `
 
 A process opening `/dev/uinput` gets a Unix socket to the daemon. `ioctl()` and `write()` calls are serialized into messages (`MSG_IOCTL`, `MSG_WRITE`) and forwarded over the socket. The daemon maintains the full device state machine — capability setup via `UI_SET_*BIT`, device creation via `UI_DEV_SETUP`/`UI_DEV_CREATE` (or the legacy `uinput_user_dev` write path), and teardown via `UI_DEV_DESTROY`.
 
-On creation, the daemon allocates a memfd-backed shared memory ring, creates a real device node via `mknod`, writes a udev database entry, and optionally emits netlink uevents.
+On creation, the daemon allocates a memfd-backed shared memory ring, writes a udev database entry, adds the device to the sysfs mirror, creates a real device node via `mknod`, and optionally emits netlink uevents.
 
 ### Readers (evdev)
 
-A process opening `/dev/input/eventN` connects to the daemon, which sends back the device's shared-memory fd via `SCM_RIGHTS`. The preload library mmaps the ring read-only.
+A process opening `/dev/input/eventN` connects to the daemon, which sends back the device's shared-memory fd and the reader's doorbell eventfd via `SCM_RIGHTS`. The preload library mmaps the ring read-only. Opening a node that does not exist fails with `ENOENT` without contacting the daemon. Reader state is shared between `dup`ed fds.
 
-**Reads** consume events from the ring buffer using `packet_head` (the position after the last `SYN_REPORT`) to ensure only complete packets are delivered. Blocking reads use `futex(FUTEX_WAIT)` on the ring's `wake_seq` word with a 3-second timeout, falling back to heartbeat liveness checks. Ring overflow is detected and reported as `SYN_DROPPED`.
+**Reads** consume events from the ring buffer using `packet_head` (the position after the last `SYN_REPORT`) to ensure only complete packets are delivered. Error checks follow `evdev_read`'s order. Blocking reads use `futex(FUTEX_WAIT)` on the ring's `wake_seq` word with no timeout. Ring overflow is detected and reported as `SYN_DROPPED`. A reader whose daemon socket has hung up gets `ENODEV`.
 
-**Poll/ppoll** splits file descriptors into evdev (futex-based) and non-evdev (real `poll`) groups. Evdev readiness is checked via `packet_head`; when mixed with real fds, the implementation uses `futex_waitv` with 1ms time slices to multiplex. Stack-allocated arrays are used for up to 256 fds, with heap fallback beyond that.
+**Poll/ppoll** and **select/pselect** become a single real `ppoll` in which each virtual evdev fd is replaced by its daemon socket (for hangup) and its doorbell (for readability).
 
-**Epoll** is supported via a tracking table that records virtual fd registrations per epoll instance. `epoll_wait` converts tracked entries into a `poll` call through `intercept_poll`.
-
-**Select/pselect** pass through to real implementations with logging for virtual fds.
+**Epoll** registrations of virtual fds go into an inner epoll set, registered in the caller's epoll set, that watches each fd's doorbell, so `epoll_wait` sleeps in the kernel.
 
 Clock conversion is supported: readers can request `CLOCK_MONOTONIC` via `EVIOCSCLOCKID`, and events are re-stamped from the ring's `CLOCK_REALTIME` timestamps on delivery.
 
 ### Sysfs / udev
 
-`stat`, `lstat`, `fstat`, `access`, `faccessat`, `opendir`, `readdir`, `readlink`, and `open` are intercepted for:
+The daemon maintains a real directory tree under `/tmp/uinput/sysfs` with kernel-format content for the virtual devices: `devices/virtual/input/inputN/` (with `eventN/`), `class/input/` links, `dev/char/13:N` links, and a `/proc/bus/input/devices` listing.
+
+Path-based calls are redirected into the mirror for:
+
+- `/sys/class/input/`
+- `/sys/devices/virtual/input/`
+- `/sys/dev/char/13:*`
+- `/proc/bus/input/devices`
+
+so host input devices are hidden. Relative lookups through directory fds are resolved via `/proc/self/fd/N`, `readlink`/`realpath` results are translated back to the system path, and `fstatfs` on a mirror fd reports `SYSFS_MAGIC` (or `PROC_SUPER_MAGIC`) so libudev accepts it.
+
+Virtual fds are also intercepted for:
 
 - `/dev/uinput` — stat as char device `10:223`
-- `/dev/input/eventN` — stat as char device `13:(64+N)`
-- `/sys/class/input/` — fake directory listing of `eventN` symlinks
-- `/sys/class/input/eventN` — symlink target to `../../devices/virtual/input/inputN/eventN`
-- `/sys/devices/virtual/input/` — fake directory listing of `inputN` directories
-- `/sys/devices/virtual/input/inputN/` — fake directory with `name`, `id/`, `capabilities/`, `uevent`, `eventN/`
-- `/sys/devices/virtual/input/inputN/eventN/` — fake directory with `dev`, `uevent`
-- Attribute files (`name`, `id/bustype`, `id/vendor`, `id/product`, `id/version`, `capabilities/*`, `dev`, `uevent`) — served as memfd-backed read-only fds with kernel-format content
-- `/proc/self/fd/N` — readlink returns the fake device path for virtual fds
+- `/dev/input/eventN` — fstat as char device `13:(64+N)`
+- `/proc/self/fd/N` — readlink returns the device path for virtual fds
 
-The device info cache queries the daemon once per device and caches results for the process lifetime, invalidated on `/dev/input` directory opens.
-
-Inotify watches on input-related paths are tracked and logged but passed through to real implementations.
+Inotify watches on input-related paths are passed through to real implementations, and tracked and logged in the extra variant.
 
 ### Force feedback
 
 FF effect uploads (`EVIOCSFF`) and erases (`EVIOCRMFF`) from readers are proxied to the writer via `MSG_FF_REQUEST`. The daemon manages up to 16 FF effect slots per device, with effect IDs allocated in `int16_t` range to avoid collisions. The writer handles `UI_BEGIN_FF_UPLOAD`/`UI_END_FF_UPLOAD` and `UI_BEGIN_FF_ERASE`/`UI_END_FF_ERASE` as a real uinput driver would.
 
 `EV_FF` trigger events from readers are forwarded to the writer via `MSG_EVDEV_WRITE`.
-
-### Joystick API
-
-The daemon handles legacy joystick ioctls (`JSIOCGNAME`, `JSIOCGAXES`, `JSIOCGBUTTONS`) for reader connections, deriving axis/button counts from the device capability bits.
 
 ## Wire protocol
 
@@ -106,8 +104,8 @@ Message types:
 | `MSG_EVDEV_WRITE` | Reader → Daemon | EV_FF trigger events |
 | `MSG_IOCTL_REPLY` | Daemon → Client | Ioctl response |
 | `MSG_DEVICE_LIST_REPLY` | Daemon → Client | Device list response |
-| `MSG_DEVICE_INFO` | Client → Daemon | Query device metadata |
-| `MSG_DEVICE_INFO_REPLY` | Daemon → Client | Full device info (for sysfs) |
+| `MSG_DEVICE_INFO` | Client → Daemon | Query device metadata (unused by the preload) |
+| `MSG_DEVICE_INFO_REPLY` | Daemon → Client | Full device info |
 
 ## Environment variables
 

@@ -66,8 +66,9 @@ int main(int argc, char *argv[]) {
 
     fclose(fp);
 
-    /* Output the LD_PRELOAD export for the caller to source */
+    /* Output the LD_PRELOAD and UINPUT_PRELOAD exports for the caller to source */
     printf("export LD_PRELOAD='%s/$LIB/%s'\n", uinput_path, lib_name);
+    printf("export UINPUT_PRELOAD='%s/$LIB/%s'\n", uinput_path, lib_name);
 
     return 0;
 }

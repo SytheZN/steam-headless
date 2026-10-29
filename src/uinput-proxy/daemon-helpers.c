@@ -13,6 +13,7 @@
 #include <sys/ioctl.h>
 #include <sys/sysmacros.h>
 #include <sys/syscall.h>
+#include <sys/eventfd.h>
 #include <linux/netlink.h>
 #include <linux/futex.h>
 #include <limits.h>
@@ -91,11 +92,17 @@ void send_ioctl_reply(int fd, int32_t ret, int32_t err,
 /* Device slot management                                             */
 /* ------------------------------------------------------------------ */
 
-/* Try to create character device node for given device number. Returns 0 on success, -1 on failure. */
-static int try_create_stub(int device_num) {
+static bool stub_exists(int device_num) {
     char path[64];
     snprintf(path, sizeof(path), "/dev/input/event%d", device_num);
-    dev_t rdev = makedev(INPUT_MAJOR, EVDEV_MINOR(device_num));
+    return access(path, F_OK) == 0;
+}
+
+/* Create the character device node for the device's allocated number. Returns 0 on success, -1 on failure. */
+int device_create_stub(struct virtual_device *dev) {
+    char path[64];
+    snprintf(path, sizeof(path), "/dev/input/event%d", dev->device_num);
+    dev_t rdev = makedev(INPUT_MAJOR, EVDEV_MINOR(dev->device_num));
     if (mknod(path, S_IFCHR | 0666, rdev) == 0) {
         if (chmod(path, 0666) < 0)
             dlog("chmod failed for %s: %s", path, strerror(errno));
@@ -126,12 +133,9 @@ int device_create_shmem(struct virtual_device *dev) {
         close(sfd);
         return -1;
     }
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
     atomic_store_explicit(&shm->write_pos,  0, memory_order_relaxed);
     atomic_store_explicit(&shm->packet_head, 0, memory_order_relaxed);
     atomic_store_explicit(&shm->wake_seq,   0, memory_order_relaxed);
-    atomic_store_explicit(&shm->heartbeat,  (uint64_t)now.tv_sec, memory_order_relaxed);
     dev->shmem_fd = sfd;
     dev->shmem    = shm;
     return 0;
@@ -140,7 +144,7 @@ int device_create_shmem(struct virtual_device *dev) {
 /* Find free device number and create device node. Returns 0 on success, -1 on failure. */
 int device_allocate_number(struct virtual_device *dev) {
     for (int n = 0; n < MAX_DEVICE_NUM; n++) {
-        if (try_create_stub(n) == 0) {
+        if (!stub_exists(n) && find_slot_by_num(n) < 0) {
             dev->device_num = n;
             return 0;
         }
@@ -160,8 +164,10 @@ struct virtual_device *alloc_device(void) {
             devices[i].writer_fd  = -1;
             devices[i].shmem_fd   = -1;
             devices[i].shmem      = NULL;
-            for (int r = 0; r < MAX_READERS; r++)
-                devices[i].reader_fds[r] = -1;
+            for (int r = 0; r < MAX_READERS; r++) {
+                devices[i].reader_fds[r]       = -1;
+                devices[i].reader_doorbells[r] = -1;
+            }
 
             /* Device number and shmem assigned later in UI_DEV_CREATE */
             devices[i].device_num = -1;
@@ -191,6 +197,57 @@ static void reader_slot_close(struct virtual_device *dev, int r) {
         shutdown(dev->reader_fds[r], SHUT_RDWR);
         dev->reader_fds[r] = -1;
     }
+    if (dev->reader_doorbells[r] >= 0) {
+        close(dev->reader_doorbells[r]);
+        dev->reader_doorbells[r] = -1;
+    }
+}
+
+void device_ring_doorbells(struct virtual_device *dev) {
+    for (int r = 0; r < MAX_READERS; r++) {
+        if (dev->reader_doorbells[r] >= 0)
+            eventfd_write(dev->reader_doorbells[r], 1);
+    }
+}
+
+#define NSEC_PER_SEC  1000000000LL
+#define NSEC_PER_USEC 1000LL
+
+static int64_t clock_now_ns(clockid_t clock) {
+    struct timespec ts;
+    clock_gettime(clock, &ts);
+    return (int64_t)ts.tv_sec * NSEC_PER_SEC + ts.tv_nsec;
+}
+
+void device_note_event_time(struct virtual_device *dev, const struct input_event *ev) {
+    int64_t t = (int64_t)ev->input_event_sec * NSEC_PER_SEC + (int64_t)ev->input_event_usec * NSEC_PER_USEC;
+    if (t <= 0) return;
+    int64_t now = clock_now_ns(CLOCK_MONOTONIC);
+    if (t < now - UINPUT_TIMESTAMP_ALLOWED_OFFSET_SECS * NSEC_PER_SEC || t > now) return;
+    dev->packet_time_mono_ns = t;
+}
+
+void device_seal_packet(struct virtual_device *dev, uint64_t end) {
+    struct evdev_shmem *shm = dev->shmem;
+    int64_t mono_now = clock_now_ns(CLOCK_MONOTONIC);
+    int64_t real_now = clock_now_ns(CLOCK_REALTIME);
+    int64_t mono = dev->packet_time_mono_ns ? dev->packet_time_mono_ns : mono_now;
+    int64_t real = mono + (real_now - mono_now);
+    dev->packet_time_mono_ns = 0;
+
+    uint64_t start = atomic_load_explicit(&shm->packet_head, memory_order_relaxed);
+    if (end - start > EVDEV_RING_FRAMES) start = end - EVDEV_RING_FRAMES;
+    for (uint64_t pos = start; pos < end; pos++) {
+        struct input_event ev;
+        uint8_t *frame = shm->buf + FRAME_RING_BYTE(pos);
+        memcpy(&ev, frame, sizeof(ev));
+        ev.input_event_sec  = real / NSEC_PER_SEC;
+        ev.input_event_usec = (real % NSEC_PER_SEC) / NSEC_PER_USEC;
+        memcpy(frame, &ev, sizeof(ev));
+    }
+
+    atomic_store_explicit(&shm->write_pos, end, memory_order_release);
+    atomic_store_explicit(&shm->packet_head, end, memory_order_release);
 }
 
 void device_destroy(struct virtual_device *dev) {
@@ -203,22 +260,15 @@ void device_destroy(struct virtual_device *dev) {
         uint64_t packet_head = atomic_load_explicit(&dev->shmem->packet_head, memory_order_relaxed);
 
         if (write_pos != packet_head) {
-            /* Incomplete packet - generate SYN_REPORT with current time */
-            struct timespec ts_now;
-            clock_gettime(CLOCK_REALTIME, &ts_now);
+            /* Incomplete packet - complete it with a SYN_REPORT */
             struct input_event sync_ev = {
-                .input_event_sec  = ts_now.tv_sec,
-                .input_event_usec = ts_now.tv_nsec / 1000,
                 .type = EV_SYN,
                 .code = SYN_REPORT,
                 .value = 0
             };
 
             memcpy(dev->shmem->buf + FRAME_RING_BYTE(write_pos), &sync_ev, sizeof(sync_ev));
-            write_pos++;
-
-            atomic_store_explicit(&dev->shmem->write_pos, write_pos, memory_order_release);
-            atomic_store_explicit(&dev->shmem->packet_head, write_pos, memory_order_release);
+            device_seal_packet(dev, write_pos + 1);
             atomic_fetch_add_explicit(&dev->shmem->wake_seq, 1, memory_order_release);
             syscall(SYS_futex, &dev->shmem->wake_seq, FUTEX_WAKE, INT_MAX, NULL, NULL, 0);
 
@@ -232,11 +282,16 @@ void device_destroy(struct virtual_device *dev) {
         send_uevent_input("remove", dev->device_num);
         device_remove_stub(dev);
         device_remove_udev_db(dev);
+        sysfs_mirror_remove(dev);
     }
     for (int r = 0; r < MAX_READERS; r++)
         reader_slot_close(dev, r);
     dev->reader_count = 0;
     if (dev->shmem) {
+        /* Wake blocked readers only after their sockets are shut down, so a woken
+         * reader observes the hang-up and returns ENODEV instead of waiting again. */
+        atomic_fetch_add_explicit(&dev->shmem->wake_seq, 1, memory_order_release);
+        syscall(SYS_futex, &dev->shmem->wake_seq, FUTEX_WAKE, INT_MAX, NULL, NULL, 0);
         munmap(dev->shmem, sizeof(struct evdev_shmem));
         dev->shmem = NULL;
     }
@@ -412,16 +467,22 @@ void remove_reader_from_device(struct virtual_device *dev, int fd) {
 
 int add_reader_to_device(struct virtual_device *dev, int fd) {
     for (int i = 0; i < MAX_READERS; i++) {
-        if (dev->reader_fds[i] == fd) return 0; /* duplicate */
+        if (dev->reader_fds[i] == fd) return i;
     }
     for (int i = 0; i < MAX_READERS; i++) {
         if (dev->reader_fds[i] < 0) {
-            dev->reader_fds[i] = fd;
+            int doorbell = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+            if (doorbell < 0) {
+                logmsg("eventfd: %s", strerror(errno));
+                return -1;
+            }
+            dev->reader_fds[i]       = fd;
+            dev->reader_doorbells[i] = doorbell;
             dev->reader_count++;
-            return 0;
+            return i;
         }
     }
-    return -1; /* no free slots */
+    return -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -429,15 +490,14 @@ int add_reader_to_device(struct virtual_device *dev, int fd) {
 /* ------------------------------------------------------------------ */
 
 int send_fds(int sock, int *fds, int nfds) {
-    /* nfds is always 1 at all call sites; cmsgbuf is sized for exactly 1 fd */
-    assert(nfds == 1);
-    char cmsgbuf[CMSG_SPACE(sizeof(int))];
+    assert(nfds >= 1 && nfds <= EVDEV_OPEN_FD_COUNT);
+    char cmsgbuf[CMSG_SPACE(sizeof(int) * EVDEV_OPEN_FD_COUNT)];
     struct iovec  iov  = { .iov_base = "",  .iov_len = 1 };
     struct msghdr msg  = {
         .msg_iov        = &iov,
         .msg_iovlen     = 1,
         .msg_control    = cmsgbuf,
-        .msg_controllen = sizeof(cmsgbuf),
+        .msg_controllen = CMSG_SPACE(sizeof(int) * nfds),
     };
     struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
     cmsg->cmsg_level = SOL_SOCKET;

@@ -10,13 +10,12 @@ LDFLAGS_LIB = -shared -ldl -flto -Wl,--gc-sections -Wl,-O1 \
 
 LDFLAGS_DAEMON =
 
-PRELOAD_SRCS = preload.c preload-helpers.c \
+PRELOAD_SRCS = preload.c preload-helpers.c preload-sysfs.c \
                preload-intercept-open.c preload-intercept-io.c \
-               preload-intercept-dir.c preload-intercept-stat.c \
-               preload-intercept-poll.c
+               preload-intercept-stat.c preload-intercept-poll.c
 PRELOAD_HDRS = preload.h protocol.h
 
-DAEMON_SRCS  = daemon.c daemon-helpers.c daemon-ioctl.c
+DAEMON_SRCS  = daemon.c daemon-helpers.c daemon-ioctl.c daemon-sysfs.c
 DAEMON_HDRS  = daemon.h protocol.h
 
 INSTALL_SRCS = uinput-install.c

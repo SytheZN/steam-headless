@@ -2,6 +2,13 @@
 
 SESSION_FILE="/tmp/next-session"
 
+if [ -n "$UINPUT_PRELOAD" ]; then
+    case ":$LD_PRELOAD:" in
+        *":$UINPUT_PRELOAD:"*) ;;
+        *) export LD_PRELOAD="$UINPUT_PRELOAD${LD_PRELOAD:+:$LD_PRELOAD}" ;;
+    esac
+fi
+
 log "session-manager" "Session manager started"
 
 # Start with Steam by default

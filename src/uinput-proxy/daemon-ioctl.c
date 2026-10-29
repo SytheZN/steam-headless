@@ -6,11 +6,6 @@
 
 #include "daemon.h"
 
-/* Joystick API ioctl NR fields (linux/joystick.h) */
-#define JSIOCGAXES_NR    0x11
-#define JSIOCGBUTTONS_NR 0x12
-#define JSIOCGNAME_NR    0x13
-
 /* Kernel bits_to_user() return value */
 #define BITS_PER_LONG (sizeof(long) * 8)
 #define BITS_TO_LONGS(n) (((n) + BITS_PER_LONG - 1) / BITS_PER_LONG)
@@ -79,7 +74,19 @@ void handle_writer_ioctl(int fd, struct virtual_device *dev,
         }
 
         dev->created = true;
+        /* Readers react to the /dev/input node via inotify and immediately resolve it
+         * through sysfs and the udev database. The kernel registers the sysfs device
+         * before the devtmpfs node appears, so both must exist before mknod. */
         device_write_udev_db(dev);
+        sysfs_mirror_add(dev);
+        if (device_create_stub(dev) < 0) {
+            int err = errno;
+            sysfs_mirror_remove(dev);
+            device_remove_udev_db(dev);
+            dev->created = false;
+            send_ioctl_reply(fd, -1, err, NULL, 0);
+            return;
+        }
         send_uevent_input("add", dev->device_num);
         send_uevent("add", dev->device_num);
         logmsg("device slot %d created as /dev/input/event%d: %s", dev->id, dev->device_num, dev->name);
@@ -180,6 +187,11 @@ void handle_writer_ioctl(int fd, struct virtual_device *dev,
 
 void handle_reader_ioctl(int fd, struct virtual_device *dev,
                          uint32_t cmd, uint8_t *data, uint32_t dlen) {
+    if (_IOC_TYPE(cmd) != 'E') {
+        send_ioctl_reply(fd, -1, EINVAL, NULL, 0);
+        return;
+    }
+
     if (cmd == EVIOCGVERSION) {
         int32_t ver = EVDEV_VERSION;
         send_ioctl_reply(fd, 0, 0, &ver, sizeof(ver));
@@ -303,31 +315,6 @@ void handle_reader_ioctl(int fd, struct virtual_device *dev,
 
         send_ioctl_reply(fd, BITS_RET(maxbit, sz), 0, buf, sz);
         return;
-    }
-
-    if (_IOC_TYPE(cmd) == 'j') {
-        if (_IOC_NR(cmd) == JSIOCGNAME_NR) {
-            size_t sz = _IOC_SIZE(cmd);
-            char buf[256] = {0};
-            strncpy(buf, dev->name, sizeof(buf) - 1);
-            size_t reply_sz = sz < sizeof(buf) ? sz : sizeof(buf);
-            send_ioctl_reply(fd, (int32_t)strlen(buf) + 1, 0, buf, (uint32_t)reply_sz);
-            return;
-        }
-        if (_IOC_NR(cmd) == JSIOCGAXES_NR) {
-            uint8_t count = 0;
-            for (int i = 0; i < ABS_CNT; i++)
-                if (dev->absbit[i / 8] & (1 << (i % 8))) count++;
-            send_ioctl_reply(fd, 0, 0, &count, sizeof(count));
-            return;
-        }
-        if (_IOC_NR(cmd) == JSIOCGBUTTONS_NR) {
-            uint8_t count = 0;
-            for (int i = 0; i < KEY_CNT; i++)
-                if (dev->keybit[i / 8] & (1 << (i % 8))) count++;
-            send_ioctl_reply(fd, 0, 0, &count, sizeof(count));
-            return;
-        }
     }
 
     if (cmd == EVIOCSFF && dlen >= sizeof(struct ff_effect)) {

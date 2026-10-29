@@ -38,8 +38,6 @@ services:
     cap_add:
       - SYS_ADMIN
       - SYS_NICE
-      # Only needed when running with debug=uinput_extra for uevent broadcasts
-      #- NET_ADMIN
 
     security_opt:
       - seccomp:./seccomp.json

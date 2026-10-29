@@ -13,12 +13,14 @@
 #include <time.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/select.h>
 #include <sys/epoll.h>
 #include <sys/inotify.h>
 #include <string.h>
+#include <limits.h>
 #include <linux/futex.h>
 #include <linux/input.h>
 
@@ -78,10 +80,6 @@ extern int      (*real_dup2)(int, int);
 extern int      (*real_dup3)(int, int, int);
 extern int      (*real_fcntl)(int, int, ...);
 extern DIR    * (*real_opendir)(const char *);
-extern struct dirent   *(*real_readdir)(DIR *);
-extern struct dirent64 *(*real_readdir64)(DIR *);
-extern int      (*real_closedir)(DIR *);
-extern int      (*real_dirfd)(DIR *);
 extern int      (*real_stat)(const char *, struct stat *);
 extern int      (*real_stat64)(const char *, struct stat64 *);
 extern int      (*real_lstat)(const char *, struct stat *);
@@ -110,6 +108,34 @@ extern int      (*real_inotify_init)(void);
 extern int      (*real_inotify_init1)(int);
 extern int      (*real_inotify_add_watch)(int, const char *, uint32_t);
 extern int      (*real_inotify_rm_watch)(int, int);
+extern int      (*real_fstatat)(int, const char *, struct stat *, int);
+extern int      (*real_fstatat64)(int, const char *, struct stat64 *, int);
+extern int      (*real_fxstatat)(int, int, const char *, struct stat *, int);
+extern int      (*real_fxstatat64)(int, int, const char *, struct stat64 *, int);
+extern int      (*real_statx)(int, const char *, int, unsigned int, struct statx *);
+extern ssize_t  (*real_readlinkat)(int, const char *, char *, size_t);
+extern char   * (*real_realpath)(const char *, char *);
+extern char   * (*real___realpath_chk)(const char *, char *, size_t);
+extern FILE   * (*real_fopen)(const char *, const char *);
+extern FILE   * (*real_fopen64)(const char *, const char *);
+extern int      (*real_scandir)(const char *, struct dirent ***,
+                                int (*)(const struct dirent *),
+                                int (*)(const struct dirent **, const struct dirent **));
+extern int      (*real_scandir64)(const char *, struct dirent64 ***,
+                                  int (*)(const struct dirent64 *),
+                                  int (*)(const struct dirent64 **, const struct dirent64 **));
+extern int      (*real___open_2)(const char *, int);
+extern int      (*real___open64_2)(const char *, int);
+extern int      (*real___openat_2)(int, const char *, int);
+extern int      (*real___openat64_2)(int, const char *, int);
+extern ssize_t  (*real___readlinkat_chk)(int, const char *, char *, size_t, size_t);
+extern int      (*real_fstatfs)(int, struct statfs *);
+extern int      (*real_fstatfs64)(int, struct statfs64 *);
+
+bool    sysfs_redirect(const char *path, char *mirror);
+bool    sysfs_redirect_at(int dirfd, const char *path, char *mirror);
+ssize_t sysfs_unredirect(char *path, ssize_t len, size_t bufsz);
+long    sysfs_mirror_fs_type(int fd);
 
 /* ------------------------------------------------------------------ */
 /* Path classification                                                */
@@ -120,18 +146,12 @@ typedef enum {
     PATH_UINPUT,
     PATH_DEV_INPUT_DIR,
     PATH_EVDEV,
-    PATH_SYSFS_EVENT,
-    PATH_SYSFS_INPUT,
-    PATH_SYSFS_CLASS,
-    PATH_SYSFS_CLASS_DIR,
-    PATH_SYSFS_VIRT_DIR,
     PATH_PROC_SELF_FD,
 } path_class_t;
 
 typedef struct {
     path_class_t cls;
     int          dev_id;
-    const char  *remainder;   /* points into original string (attr suffix) */
 } path_info_t;
 
 path_info_t classify_path(const char *path);
@@ -144,15 +164,27 @@ path_info_t classify_path(const char *path);
 
 typedef enum { VFD_UINPUT = 0, VFD_EVDEV = 1, VFD_SYSFS = 2 } vfd_type_t;
 
-struct virtual_fd {
-    _Atomic bool              active;
-    vfd_type_t                type;
-    int                       device_id;
-    int                       flags;
-    bool                      created;
+struct evdev_reader {
+    _Atomic int               refs;
     const struct evdev_shmem *shmem;
+    int                       doorbell;
     uint64_t                  read_pos;
     uint32_t                  clock_type;
+};
+
+struct evdev_reader *evdev_reader_new(const struct evdev_shmem *shmem, int doorbell);
+void                 evdev_reader_release(struct evdev_reader *reader);
+bool                 evdev_reader_has_packet(const struct evdev_reader *reader);
+void                 evdev_reader_sync_doorbell(struct evdev_reader *reader);
+bool                 evdev_socket_hung_up(int sock);
+
+struct virtual_fd {
+    _Atomic bool         active;
+    vfd_type_t           type;
+    int                  device_id;
+    int                  flags;
+    bool                 created;
+    struct evdev_reader *reader;
 };
 
 extern struct virtual_fd vfd_table[VFD_MAX];
@@ -165,9 +197,7 @@ static inline void vfd_set(int fd, vfd_type_t type, int device_id) {
     vfd_table[fd].device_id  = device_id;
     vfd_table[fd].flags      = 0;
     vfd_table[fd].created    = false;
-    vfd_table[fd].shmem      = NULL;
-    vfd_table[fd].read_pos   = 0;
-    vfd_table[fd].clock_type = CLOCK_REALTIME;
+    vfd_table[fd].reader     = NULL;
     atomic_store_explicit(&vfd_table[fd].active, true, memory_order_release);
 }
 
@@ -183,40 +213,28 @@ static inline void vfd_dup(int oldfd, int newfd) {
     dst->type       = src->type;
     dst->device_id  = src->device_id;
     dst->flags      = src->flags;
-    dst->shmem      = src->shmem;
-    dst->read_pos   = src->read_pos;
-    dst->clock_type = src->clock_type;
+    dst->created    = src->created;
+    dst->reader     = src->reader;
+    if (dst->reader)
+        atomic_fetch_add_explicit(&dst->reader->refs, 1, memory_order_relaxed);
     atomic_store_explicit(&dst->active,
         atomic_load_explicit(&src->active, memory_order_relaxed),
         memory_order_release);
 }
 
 static inline void vfd_clear(int fd) {
-    if (fd >= 0 && fd < VFD_MAX)
-        atomic_store_explicit(&vfd_table[fd].active, false, memory_order_release);
+    if (fd < 0 || fd >= VFD_MAX) return;
+    atomic_store_explicit(&vfd_table[fd].active, false, memory_order_release);
+    if (vfd_table[fd].reader) {
+        evdev_reader_release(vfd_table[fd].reader);
+        vfd_table[fd].reader = NULL;
+    }
 }
 
 static inline bool vfd_is_active(int fd) {
     return fd >= 0 && fd < VFD_MAX &&
            atomic_load_explicit(&vfd_table[fd].active, memory_order_acquire);
 }
-
-/* ------------------------------------------------------------------ */
-/* Fake DIR                                                           */
-/* ------------------------------------------------------------------ */
-
-#define FAKE_DIR_MAGIC       0xD1FD1F00U
-#define FAKE_DIRFD_SENTINEL  0x7FFF0001
-#define FAKE_DIR_MAX_ENTRIES 32
-
-struct fake_dir {
-    uint32_t        magic;
-    int             count;
-    int             pos;
-    char            path[256];
-    struct dirent   entries[FAKE_DIR_MAX_ENTRIES];
-    struct dirent64 entries64[FAKE_DIR_MAX_ENTRIES];
-};
 
 /* ------------------------------------------------------------------ */
 /* Wire event conversion (native <-> 24-byte wire format)             */
@@ -272,42 +290,9 @@ int  recv_fds(int sock, int *fds, int nfds);
 int  query_device_list(int *ids);
 bool device_exists(int dev_id);
 
-const struct device_info *get_device_info(int dev_id);
-void sysfs_cache_invalidate(void);
-
-/* ------------------------------------------------------------------ */
-/* Sysfs content helpers (preload-helpers.c)                          */
-/* ------------------------------------------------------------------ */
-
-void format_capability_hex(const uint8_t *bits, int bit_count,
-                            char *out, size_t outsz);
-int  make_sysfs_fd(const char *content);
-int  open_sysfs_content(int dev_id, const char *attr);
-
-/* ------------------------------------------------------------------ */
-/* Fake DIR helpers (preload-helpers.c)                               */
-/* ------------------------------------------------------------------ */
-
-bool             is_fake_dir(DIR *d);
-struct fake_dir *make_fake_dir(const char *path);
-void             fake_dir_add(struct fake_dir *d, const char *name,
-                               unsigned char type, ino_t ino);
-
-/* ------------------------------------------------------------------ */
-/* Stat fill helpers (preload-helpers.c)                              */
-/* ------------------------------------------------------------------ */
-
-void fill_reg_stat(struct stat *st);
-void fill_lnk_stat(struct stat *st);
 void fill_chr_stat(struct stat *st, dev_t rdev);
-void fill_dir_stat(struct stat *st);
-
-void fill_reg_stat64(struct stat64 *st);
-void fill_lnk_stat64(struct stat64 *st);
 void fill_chr_stat64(struct stat64 *st, dev_t rdev);
-void fill_dir_stat64(struct stat64 *st);
-
-bool is_sysfs_dir_attr(const char *rem);
+void fill_chr_statx(struct statx *stx, dev_t rdev);
 
 /* ------------------------------------------------------------------ */
 /* Intercept predicates + handlers                                    */
@@ -328,26 +313,15 @@ ssize_t intercept_read(int fd, void *buf, size_t count);
 bool    should_intercept_write(int fd);
 ssize_t intercept_write(int fd, const void *buf, size_t count);
 
-bool    should_intercept_opendir(const char *path);
-DIR    *intercept_opendir(const char *path);
-
-bool             should_intercept_readdir(DIR *dirp);
-struct dirent   *intercept_readdir(DIR *dirp);
-struct dirent64 *intercept_readdir64(DIR *dirp);
-
-bool should_intercept_closedir(DIR *dirp);
-int  intercept_closedir(DIR *dirp);
-
-bool should_intercept_dirfd(DIR *dirp);
-int  intercept_dirfd(DIR *dirp);
-
 bool    should_intercept_stat(const char *path);
 int     intercept_stat(const char *path, struct stat *st);
 int     intercept_stat64(const char *path, struct stat64 *st);
+int     intercept_statx(const char *path, struct statx *stx);
 
 bool    should_intercept_fstat(int fd);
 int     intercept_fstat(int fd, struct stat *st);
 int     intercept_fstat64(int fd, struct stat64 *st);
+int     intercept_fstatx(int fd, struct statx *stx);
 
 bool    should_intercept_access(const char *path);
 int     intercept_access(const char *path);
@@ -360,11 +334,18 @@ int  intercept_poll(struct pollfd *fds, nfds_t nfds, int timeout_ms);
 int  intercept_ppoll(struct pollfd *fds, nfds_t nfds,
                      const struct timespec *tmo, const sigset_t *sigmask);
 
+bool should_intercept_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds);
+int  intercept_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+                      struct timeval *timeout);
+int  intercept_pselect(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+                       const struct timespec *timeout, const sigset_t *sigmask);
+
 bool should_intercept_fcntl(int fd, int cmd);
 int  intercept_fcntl(int fd, int cmd, long arg);
 
 bool should_intercept_close(int fd);
 int  intercept_close(int fd);
+void release_vfd(int fd);
 
 bool should_intercept_epoll_ctl(int epfd, int op, int fd);
 int  intercept_epoll_ctl(int epfd, int op, int fd, struct epoll_event *ev);
@@ -384,15 +365,24 @@ int  intercept_epoll_pwait(int epfd, struct epoll_event *events,
 
 struct epoll_vfd_entry {
     int            fd;
+    int            doorbell;
     uint32_t       events;
     epoll_data_t   data;
+    bool           disarmed;
+    bool           pending;
 };
 
 struct epoll_track_entry {
     _Atomic bool         active;
     int                  epfd;
+    int                  inner_epfd;
+    int                  kick;
     struct epoll_vfd_entry vfds[EPOLL_VFD_MAX];
     int                  count;
 };
+
+bool should_intercept_epoll_close(int fd);
+void intercept_epoll_close(int fd);
+void epoll_forget_vfd(int fd);
 
 extern struct epoll_track_entry epoll_table[EPOLL_TRACK_MAX];

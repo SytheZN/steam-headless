@@ -13,7 +13,6 @@
 #include <sys/poll.h>
 #include <limits.h>
 #include <sys/syscall.h>
-#include <sys/timerfd.h>
 #include <time.h>
 #include <linux/futex.h>
 
@@ -124,11 +123,16 @@ static bool handle_client_message(struct client *c) {
                 logmsg("evdev open: device %u not created yet", m->device_num);
                 return false;
             }
-            if (add_reader_to_device(dev, c->fd) < 0) {
+            int reader_slot = add_reader_to_device(dev, c->fd);
+            if (reader_slot < 0) {
                 logmsg("evdev open: add_reader failed for device %d", dev->id);
                 return false;
             }
-            if (send_fds(c->fd, &dev->shmem_fd, 1) < 0) {
+            int open_fds[EVDEV_OPEN_FD_COUNT] = {
+                [EVDEV_OPEN_FD_SHMEM]    = dev->shmem_fd,
+                [EVDEV_OPEN_FD_DOORBELL] = dev->reader_doorbells[reader_slot],
+            };
+            if (send_fds(c->fd, open_fds, EVDEV_OPEN_FD_COUNT) < 0) {
                 logmsg("evdev open: send_fds failed: %s", strerror(errno));
                 remove_reader_from_device(dev, c->fd);
                 return false;
@@ -195,6 +199,7 @@ static bool handle_client_message(struct client *c) {
                         memcpy(shm->buf + FRAME_RING_BYTE(w), src, WIRE_EVENT_SIZE);
                         src += WIRE_EVENT_SIZE;
                         w++;
+                        device_note_event_time(dev, ev);
 
                         if (ev->type == EV_KEY && ev->code < KEY_CNT) {
                             if (ev->value == 0)
@@ -217,7 +222,7 @@ static bool handle_client_message(struct client *c) {
 
                         if (ev->type == EV_SYN && ev->code == SYN_REPORT) {
                             has_syn_report = true;
-                            atomic_store_explicit(&shm->packet_head, w, memory_order_release);
+                            device_seal_packet(dev, w);
                         }
                     }
 
@@ -226,6 +231,7 @@ static bool handle_client_message(struct client *c) {
                     if (has_syn_report) {
                         atomic_fetch_add_explicit(&shm->wake_seq, 1, memory_order_release);
                         syscall(SYS_futex, &shm->wake_seq, FUTEX_WAKE, INT_MAX, NULL, NULL, 0);
+                        device_ring_doorbells(dev);
                     }
                 }
             }
@@ -329,6 +335,8 @@ int main(void) {
     else
         dlog("mkdir %s: ok", DEVDIR);
 
+    sysfs_mirror_init();
+
     {
         int fd = open(UINPUT_STUB, O_WRONLY | O_CREAT | O_TRUNC, 0666);
         if (fd < 0)
@@ -364,28 +372,11 @@ int main(void) {
 
     logmsg("listening on %s", SOCK_PATH);
 
-    int timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
-    if (timer_fd < 0) {
-        logmsg("timerfd_create: %s", strerror(errno)); return 1;
-    }
-    {
-        struct itimerspec ts = {
-            .it_interval = { .tv_sec = 1, .tv_nsec = 0 },
-            .it_value    = { .tv_sec = 1, .tv_nsec = 0 },
-        };
-        timerfd_settime(timer_fd, 0, &ts, NULL);
-    }
-
     for (;;) {
-        struct pollfd pfds[MAX_FDS + 2];
+        struct pollfd pfds[MAX_FDS + 1];
         int nfds = 0;
 
         pfds[nfds].fd      = server_fd;
-        pfds[nfds].events  = POLLIN;
-        pfds[nfds].revents = 0;
-        nfds++;
-
-        pfds[nfds].fd      = timer_fd;
         pfds[nfds].events  = POLLIN;
         pfds[nfds].revents = 0;
         nfds++;
@@ -410,20 +401,6 @@ int main(void) {
             break;
         }
 
-        if (pfds[1].revents & POLLIN) {
-            uint64_t expirations;
-            if (read(timer_fd, &expirations, sizeof(expirations)) <= 0) expirations = 1;
-            (void)expirations;
-            struct timespec ts;
-            clock_gettime(CLOCK_MONOTONIC, &ts);
-            uint64_t now = (uint64_t)ts.tv_sec;
-            for (int i = 0; i < MAX_DEVICES; i++) {
-                if (devices[i].active && devices[i].shmem)
-                    atomic_store_explicit(&devices[i].shmem->heartbeat,
-                                         now, memory_order_relaxed);
-            }
-        }
-
         if (pfds[0].revents & POLLIN) {
             int cfd = accept(server_fd, NULL, NULL);
             if (cfd >= 0) {
@@ -442,7 +419,7 @@ int main(void) {
             }
         }
 
-        for (int i = 2; i < nfds; i++) {
+        for (int i = 1; i < nfds; i++) {
             if (!pfds[i].revents) continue;
             int fd = pfds[i].fd;
 

@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <unistd.h>
 
 #include "preload.h"
 
@@ -10,17 +11,7 @@
 
 bool should_intercept_open(const char *path) {
     path_info_t pi = classify_path(path);
-    switch (pi.cls) {
-    case PATH_UINPUT:
-    case PATH_EVDEV:
-        return true;
-    case PATH_SYSFS_EVENT:
-    case PATH_SYSFS_INPUT:
-    case PATH_SYSFS_CLASS:
-        return pi.remainder[0] != '\0';
-    default:
-        return false;
-    }
+    return pi.cls == PATH_UINPUT || pi.cls == PATH_EVDEV;
 }
 
 int intercept_open(const char *path, int flags, mode_t mode) {
@@ -38,14 +29,15 @@ int intercept_open(const char *path, int flags, mode_t mode) {
     }
 
     if (pi.cls == PATH_EVDEV) {
+        if (real_access(path, F_OK) != 0) return -1;
         int dev_id = pi.dev_id;
         int sock = connect_to_daemon();
         if (sock < 0) { errno = ENODEV; return -1; }
         struct msg_evdev_open m = { .device_num = (uint32_t)dev_id };
         send_msg_r(sock, MSG_EVDEV_OPEN, &m, sizeof(m));
 
-        int shmem_fd;
-        int recv_ret = recv_fds(sock, &shmem_fd, 1);
+        int open_fds[EVDEV_OPEN_FD_COUNT];
+        int recv_ret = recv_fds(sock, open_fds, EVDEV_OPEN_FD_COUNT);
         if (recv_ret < 0) {
             int saved_errno = errno;
             dbg("evdev open: recv_fds failed ret=%d errno=%d, fallback to real device", recv_ret, saved_errno);
@@ -54,28 +46,31 @@ int intercept_open(const char *path, int flags, mode_t mode) {
             dbg("evdev open: real_open returned fd=%d errno=%d", fd, errno);
             return fd;
         }
+        int doorbell = open_fds[EVDEV_OPEN_FD_DOORBELL];
         const struct evdev_shmem *shm = mmap(NULL, sizeof(struct evdev_shmem),
-                                              PROT_READ, MAP_SHARED, shmem_fd, 0);
-        real_close(shmem_fd);
+                                              PROT_READ, MAP_SHARED,
+                                              open_fds[EVDEV_OPEN_FD_SHMEM], 0);
+        real_close(open_fds[EVDEV_OPEN_FD_SHMEM]);
         if (shm == MAP_FAILED) {
             dbg("evdev open: mmap failed: %s", strerror(errno));
+            real_close(doorbell);
             real_close(sock); errno = ENODEV; return -1;
+        }
+
+        struct evdev_reader *reader = evdev_reader_new(shm, doorbell);
+        if (!reader) {
+            munmap((void *)shm, sizeof(struct evdev_shmem));
+            real_close(doorbell);
+            real_close(sock); errno = ENOMEM; return -1;
         }
 
         vfd_table[sock].type      = VFD_EVDEV;
         vfd_table[sock].device_id = dev_id;
         vfd_table[sock].flags     = flags;
-        vfd_table[sock].shmem     = shm;
-        vfd_table[sock].read_pos  = atomic_load_explicit(&shm->write_pos, memory_order_acquire);
+        vfd_table[sock].created   = false;
+        vfd_table[sock].reader    = reader;
         atomic_store_explicit(&vfd_table[sock].active, true, memory_order_release);
         return sock;
-    }
-
-    if ((pi.cls == PATH_SYSFS_EVENT || pi.cls == PATH_SYSFS_INPUT ||
-         pi.cls == PATH_SYSFS_CLASS) && pi.remainder[0]) {
-        int fd = open_sysfs_content(pi.dev_id, pi.remainder);
-        if (fd >= 0) vfd_set(fd, VFD_SYSFS, pi.dev_id);
-        return fd;
     }
 
     errno = ENOENT;
@@ -83,18 +78,11 @@ int intercept_open(const char *path, int flags, mode_t mode) {
 }
 
 bool should_intercept_openat(int dfd, const char *path) {
-    if (!path) return false;
-    if (dfd == FAKE_DIRFD_SENTINEL) return true;
-    if (path[0] == '/') return should_intercept_open(path);
-    return false;
+    (void)dfd;
+    return path && path[0] == '/' && should_intercept_open(path);
 }
 
 int intercept_openat(int dfd, const char *path, int flags, mode_t mode) {
     dbg("openat: dfd=%d path=%s", dfd, path);
-    if (dfd == FAKE_DIRFD_SENTINEL) {
-        char full[256];
-        snprintf(full, sizeof(full), "/dev/input/%s", path);
-        return intercept_open(full, flags, mode);
-    }
     return intercept_open(path, flags, mode);
 }

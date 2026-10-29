@@ -5,11 +5,19 @@
 #include <linux/uinput.h>
 
 #define UINPUT_PROXY_SOCK "/tmp/uinput-proxy.sock"
+#define SYSFS_MIRROR_ROOT "/tmp/uinput/sysfs"
+#define PROC_INPUT_DEVICES_MIRROR "proc-bus-input-devices"
 
 /* Shared limits (used by both daemon and preload library) */
 #define MAX_DEVICES    8
 #define MAX_READERS    16
 #define MAX_FF_EFFECTS 16
+
+enum {
+    EVDEV_OPEN_FD_SHMEM,
+    EVDEV_OPEN_FD_DOORBELL,
+    EVDEV_OPEN_FD_COUNT,
+};
 
 /* Input subsystem constants (from linux kernel) */
 #define INPUT_MAJOR        13
@@ -23,12 +31,7 @@
 #define EVDEV_VERSION      0x010001
 
 /* Timing constants */
-#define HEARTBEAT_TIMEOUT_SEC   5    /* daemon heartbeat considered dead after this */
 #define SLOT_COOLDOWN_SEC       2    /* seconds before a destroyed slot can be reused */
-
-/* Poll timing (nanoseconds) */
-#define POLL_FUTEX_CAP_NS       1000000ULL    /* 1ms — futex cap when mixing evdev + other fds */
-#define POLL_FUTEX_CAP_ONLY_NS  3000000000ULL /* 3s  — futex cap when only evdev fds */
 
 /* Container user identity (daemon creates nodes owned by this uid/gid) */
 #define CONTAINER_UID  1000
@@ -159,7 +162,6 @@ struct evdev_shmem {
     _Atomic uint64_t write_pos;           /* frame count, release-stored by daemon */
     _Atomic uint64_t packet_head;         /* position after last SYN_REPORT (complete packet boundary) */
     _Atomic uint32_t wake_seq;            /* futex word: incremented per write batch */
-    _Atomic uint64_t heartbeat;           /* CLOCK_MONOTONIC seconds, updated ~1/s by daemon */
     uint8_t          buf[EVDEV_RING_BYTES];
 };
 

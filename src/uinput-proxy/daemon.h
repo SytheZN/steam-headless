@@ -13,6 +13,8 @@
 #define MAX_CLIENTS  (MAX_DEVICES * (1 + MAX_READERS) + 4)
 #define MAX_FDS      (MAX_CLIENTS + 4)
 
+#define UINPUT_TIMESTAMP_ALLOWED_OFFSET_SECS 10
+
 /* ------------------------------------------------------------------ */
 /* Logging                                                            */
 /* ------------------------------------------------------------------ */
@@ -89,6 +91,7 @@ struct virtual_device {
     int               ff_next_id;
 
     bool created;
+    int64_t packet_time_mono_ns;
 
     /* Shared memory ring (one per device, broadcast to all readers) */
     int                shmem_fd;                      /* memfd fd             */
@@ -96,6 +99,7 @@ struct virtual_device {
 
     /* Per-reader slots (indexed 0..MAX_READERS-1) */
     int                reader_fds[MAX_READERS];       /* control socket fds   */
+    int                reader_doorbells[MAX_READERS];
     int                reader_count;
 };
 
@@ -161,9 +165,14 @@ int                    device_allocate_number(struct virtual_device *dev);
 
 void send_uevent(const char *action, int dev_id);
 void send_uevent_input(const char *action, int dev_id);
+int  device_create_stub(struct virtual_device *dev);
 void device_remove_stub(struct virtual_device *dev);
 void device_write_udev_db(struct virtual_device *dev);
 void device_remove_udev_db(struct virtual_device *dev);
+
+void sysfs_mirror_init(void);
+void sysfs_mirror_add(const struct virtual_device *dev);
+void sysfs_mirror_remove(const struct virtual_device *dev);
 
 /* ------------------------------------------------------------------ */
 /* Ioctl handlers (daemon-ioctl.c)                                    */
@@ -182,6 +191,9 @@ struct client *alloc_client(int fd);
 void           remove_client(int fd);
 void           remove_reader_from_device(struct virtual_device *dev, int fd);
 int            add_reader_to_device(struct virtual_device *dev, int fd);
+void           device_ring_doorbells(struct virtual_device *dev);
+void           device_note_event_time(struct virtual_device *dev, const struct input_event *ev);
+void           device_seal_packet(struct virtual_device *dev, uint64_t end);
 
 /* SCM_RIGHTS helper (daemon-helpers.c) */
 int            send_fds(int sock, int *fds, int nfds);
